@@ -46,6 +46,28 @@ function log(...parts) {
   } catch {}
 }
 
+// ---- bundled discord-mcp container ------------------------------------------
+// neatz-bot is the single entry point: it ensures the local discord-mcp
+// container (saseq/discord-mcp on 127.0.0.1:8085, --restart unless-stopped)
+// is running. Docker supervises the container after that; we just kick it at
+// startup and retry while Docker Desktop is still coming up after a reboot.
+const MCP_CONTAINER = "neatz-discord-mcp";
+function ensureMcpContainer(attempt = 0) {
+  execFile("docker", ["start", MCP_CONTAINER], { windowsHide: true }, (err) => {
+    if (!err) {
+      log(`discord-mcp container '${MCP_CONTAINER}' running (http://127.0.0.1:8085/mcp)`);
+      return;
+    }
+    if (attempt < 30) {
+      // Docker Desktop can take a while after logon; retry every 20s for ~10min.
+      if (attempt === 0) log(`docker not ready yet; retrying container start (${err.message.split("\n")[0]})`);
+      setTimeout(() => ensureMcpContainer(attempt + 1), 20_000);
+    } else {
+      log(`GAVE UP starting discord-mcp container after ${attempt} attempts — MCP tools will be unavailable until Docker is up.`);
+    }
+  });
+}
+
 // ---- singleton lock ---------------------------------------------------------
 const lock = net.createServer();
 lock.on("error", (err) => {
@@ -55,7 +77,10 @@ lock.on("error", (err) => {
   }
   throw err;
 });
-lock.listen(LOCK_PORT, "127.0.0.1", startBot);
+lock.listen(LOCK_PORT, "127.0.0.1", () => {
+  ensureMcpContainer();
+  startBot();
+});
 
 // ---- per-repo serialization (two mentions must not race on git state) --------
 const queues = new Map();
