@@ -164,7 +164,12 @@ function startBot() {
 
         let reply;
         if (code === 0 && out) {
-          reply = out.length > REPLY_LIMIT ? out.slice(0, REPLY_LIMIT) + "\n…(truncated)" : out;
+          // The work order asks for the reply inside <reply>...</reply>; anything
+          // outside (analysis, self-narration) is discarded. Fall back to the
+          // full output if the markers are missing.
+          const m = out.match(/<reply>\s*([\s\S]*?)\s*<\/reply>/);
+          reply = m ? m[1] : out;
+          reply = reply.length > REPLY_LIMIT ? reply.slice(0, REPLY_LIMIT) + "\n…(truncated)" : reply;
           await message.react("✅").catch(() => {});
         } else {
           log(`Run error output: ${(err || out).slice(0, 500)}`);
