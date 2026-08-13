@@ -1,0 +1,55 @@
+{
+  "workspaceDir": "./workspace",
+  "harness": {
+    "type": "claude",
+    "command": "claude",
+    "args": [],
+    "tierArgs": {
+      "chat": [
+        "--permission-mode",
+        "dontAsk",
+        "--allowedTools",
+        "Read,Grep,Glob,WebFetch,WebSearch,mcp__discord-mcp__*,Bash(git log*),Bash(git diff*),Bash(gh pr view*),Bash(gh pr list*)"
+      ],
+      "dev": ["--permission-mode", "bypassPermissions"]
+    },
+    "timeoutMinutes": 45
+  },
+  "mcp": {
+    "port": 8085,
+    "host": "127.0.0.1",
+    "path": "/mcp"
+  },
+  "repos": {
+    "example-app": {
+      "path": "C:/Users/you/code/example-app",
+      "base": "origin/main",
+      "description": "The user-facing web app: UI, API routes, billing. Use for anything a customer would see.",
+      "notes": "PRs target main. Run `npm test` and `npm run lint` before pushing. Squash-merge only."
+    },
+    "example-infra": {
+      "path": "C:/Users/you/code/example-infra",
+      "base": "origin/develop",
+      "description": "Terraform and deploy pipelines. Use for infrastructure, CI, or environment changes.",
+      "notes": "PRs target develop. `terraform fmt` and `terraform validate` are required; never apply from a run."
+    }
+  },
+  "guilds": {
+    "111111111111111111": {
+      "name": "Example Server",
+      "repos": ["example-app", "example-infra"]
+    }
+  },
+  "access": [
+    { "user": "222222222222222222", "tier": "dev" },
+    { "guild": "111111111111111111", "role": "333333333333333333", "tier": "dev" },
+    { "channel": "444444444444444444", "everyone": true, "tier": "chat" }
+  ],
+  "workflowNotes": "",
+  "sessionTtlHours": 6,
+  "worktreeTtlHours": 24,
+  "backscrollCount": 10,
+  "replyChainMax": 5,
+  "maxConcurrentRuns": 3,
+  "lockPort": 47391
+}
