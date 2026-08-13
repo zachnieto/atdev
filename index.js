@@ -27,8 +27,14 @@ const net = require("node:net");
 const path = require("node:path");
 const { spawn, execFile } = require("node:child_process");
 const { Client, GatewayIntentBits, Events } = require("discord.js");
+const { startMcpServer } = require("./src/mcp-server");
 
 const NEATZ_ID = "145305657237700608";
+// In-process Discord MCP server (Phase 1: tests on 8086 alongside the
+// container's 8085; Phase 1 cutover flips this to 8085 and retires the
+// container). Moves into config.json in Phase 2.
+const MCP_PORT = 8086;
+const MCP_DEFAULT_GUILD_ID = "505102060119916545"; // matches container's DISCORD_GUILD_ID env
 const CLAUDE_EXE = "C:\\Users\\zachn\\.local\\bin\\claude.exe";
 const LOCK_PORT = 47391; // singleton guard: second instance exits immediately
 const RUN_TIMEOUT_MS = 45 * 60 * 1000;
@@ -442,7 +448,11 @@ function startBot() {
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
   });
 
-  client.once(Events.ClientReady, (c) => log(`Logged in as ${c.user.tag} (${c.user.id})`));
+  client.once(Events.ClientReady, (c) => {
+    log(`Logged in as ${c.user.tag} (${c.user.id})`);
+    startMcpServer(client, { host: "127.0.0.1", port: MCP_PORT, path: "/mcp", defaultGuildId: MCP_DEFAULT_GUILD_ID });
+    log(`In-process discord-mcp listening on http://127.0.0.1:${MCP_PORT}/mcp`);
+  });
 
   client.on(Events.MessageCreate, async (message) => {
     try {
