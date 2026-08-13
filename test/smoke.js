@@ -1,18 +1,26 @@
 // test/smoke.js — `node test/smoke.js`. No framework: asserts only.
 //
-// Covers the pieces of the Phase 2 module split that could silently change
-// behavior: reply chunking, the config loader, access matching, and — the
-// important one — prompt parity against the pre-refactor index.js logic
-// (copied verbatim below from git HEAD before the split).
+// Covers the pieces that could silently change behavior: reply chunking, the
+// config loader, the session store, trigger evaluation, tier flag construction,
+// and — the important one — dev prompt parity against the pre-refactor
+// index.js logic (copied verbatim below from git HEAD before the split).
 
 const assert = require("node:assert");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
+// Must be set before src/sessions.js is loaded — production state stays untouched.
+const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "neatz-test-"));
+process.env.NEATZ_STATE_FILE = path.join(TMP, "sessions.json");
+
 const { loadConfig, ROOT } = require("../src/config");
-const { matchAccess } = require("../src/triggers");
-const { extractReplies, splitForDiscord, fill, gatherContext } = require("../src/runs");
+const { matchAccess, evaluate } = require("../src/triggers");
+const sessions = require("../src/sessions");
+const claude = require("../src/runners/claude");
+const { extractReplies, splitForDiscord, fill, gatherContext, projectFor, renderManifest } = require("../src/runs");
+
+const HOUR = 60 * 60 * 1000;
 
 // ---- reply chunking ----------------------------------------------------------
 assert.deepStrictEqual(splitForDiscord("a\nb", 10), ["a\nb"]);
@@ -69,6 +77,175 @@ fs.rmSync(tmp, { recursive: true, force: true });
 const msgFrom = (id) => ({ author: { id }, channelId: "c", guildId: "g", member: null });
 assert.strictEqual(matchAccess(cfg.access, msgFrom("145305657237700608")).tier, "dev");
 assert.strictEqual(matchAccess(cfg.access, msgFrom("999")), null);
+
+// every specified key must match; ordered, first match wins
+const RULES = [
+  { user: "u1", tier: "dev" },
+  { guild: "g1", role: "r1", tier: "dev" },
+  { channel: "c1", everyone: true, tier: "chat" },
+  { user: "u1", tier: "chat" }, // shadowed by the first rule
+];
+const mk = (over = {}) => ({
+  author: { id: "nobody" },
+  channelId: "cX",
+  guildId: "gX",
+  member: null,
+  channel: {},
+  ...over,
+});
+const withRole = (r) => ({ member: { roles: { cache: new Set([r]) } } });
+assert.strictEqual(matchAccess(RULES, mk({ author: { id: "u1" } })).tier, "dev", "first match wins");
+assert.strictEqual(matchAccess(RULES, mk({ guildId: "g1", ...withRole("r1") })).tier, "dev", "role rule");
+assert.strictEqual(matchAccess(RULES, mk({ guildId: "gX", ...withRole("r1") })), null, "role rule needs its guild too");
+assert.strictEqual(matchAccess(RULES, mk({ guildId: "g1", ...withRole("other") })), null, "wrong role");
+assert.strictEqual(matchAccess(RULES, mk({ channelId: "c1" })).tier, "chat", "channel + everyone");
+assert.strictEqual(matchAccess(RULES, mk({ channelId: "t9", channel: { parentId: "c1" } })).tier, "chat", "thread inherits parent");
+assert.strictEqual(matchAccess(RULES, mk()), null, "stranger");
+
+// ---- session store -----------------------------------------------------------
+{
+  const ttl = 6 * HOUR;
+  const empty = { runs: {}, byMessage: {}, latestByChannel: {} };
+
+  // a pre-Phase-3 (channel-keyed) file is discarded, not migrated
+  fs.writeFileSync(process.env.NEATZ_STATE_FILE, JSON.stringify({ "123": { sessionId: "old", updatedAt: Date.now() } }));
+  assert.deepStrictEqual(sessions.load(ttl), empty, "old schema not discarded");
+  fs.writeFileSync(process.env.NEATZ_STATE_FILE, "{not json");
+  assert.deepStrictEqual(sessions.load(ttl), empty, "corrupt file not tolerated");
+
+  sessions.recordRun("R1", { channelId: "CH", guildId: "G", tier: "dev" }, ttl);
+  sessions.recordSession("R1", "sess-1", ttl);
+  sessions.recordMessage("R1", "M-status", ttl);
+  sessions.recordMessage("R1", "M-reply", ttl);
+  sessions.recordMessage("R1", "M-reply", ttl); // idempotent
+
+  let s = sessions.load(ttl);
+  assert.deepStrictEqual(s.runs.R1.messageIds, ["M-status", "M-reply"]);
+  assert.strictEqual(s.runs.R1.sessionId, "sess-1");
+  assert.strictEqual(s.latestByChannel.CH, "R1");
+  assert.deepStrictEqual(s.byMessage, { "M-status": "R1", "M-reply": "R1" });
+
+  assert.strictEqual(sessions.runByMessage("M-reply", ttl).sessionId, "sess-1");
+  assert.strictEqual(sessions.runByMessage("unknown", ttl), null);
+  assert.strictEqual(sessions.latestRun("CH", ttl).runId, "R1");
+  assert.strictEqual(sessions.latestRun("other", ttl), null);
+
+  // a resume merges: message ids survive, tier follows the current author
+  sessions.recordRun("R1", { channelId: "CH", guildId: "G", tier: "chat" }, ttl);
+  s = sessions.load(ttl);
+  assert.strictEqual(s.runs.R1.tier, "chat");
+  assert.strictEqual(s.runs.R1.sessionId, "sess-1");
+  assert.deepStrictEqual(s.runs.R1.messageIds, ["M-status", "M-reply"]);
+
+  // past TTL: not resumable, but still on file during the 24h grace
+  const age = (ms) => {
+    const st = sessions.load(ttl);
+    st.runs.R1.updatedAt = Date.now() - ms;
+    fs.writeFileSync(process.env.NEATZ_STATE_FILE, JSON.stringify(st));
+  };
+  age(7 * HOUR);
+  assert.strictEqual(sessions.runByMessage("M-reply", ttl), null, "stale run resumed");
+  assert.strictEqual(sessions.latestRun("CH", ttl), null, "stale channel latest resumed");
+  assert.ok(sessions.load(ttl).runs.R1, "pruned before the grace period elapsed");
+
+  // past TTL + 24h grace: pruned, along with its message and channel handles
+  age(31 * HOUR);
+  assert.deepStrictEqual(sessions.load(ttl), empty, "expired run not fully pruned");
+}
+
+// ---- trigger evaluation ------------------------------------------------------
+{
+  const client = { user: { id: "BOT" } };
+  const tcfg = { ...cfg, sessionTtlHours: 6, guilds: { G: { name: "T", repos: ["neatqueue"] } }, access: RULES };
+  const msg = (over = {}) => ({
+    inGuild: () => true,
+    author: { id: "u1", bot: false },
+    guildId: "G",
+    channelId: "CH",
+    channel: {},
+    member: null,
+    mentions: { users: { has: () => false } },
+    ...over,
+  });
+  const mention = { mentions: { users: { has: (id) => id === "BOT" } } };
+
+  assert.strictEqual(evaluate(client, tcfg, msg({ inGuild: () => false, ...mention })), null, "DM");
+  assert.strictEqual(evaluate(client, tcfg, msg({ author: { id: "u1", bot: true }, ...mention })), null, "bot author");
+  assert.strictEqual(evaluate(client, tcfg, msg({ guildId: "nope", ...mention })), null, "unmapped guild");
+  assert.strictEqual(evaluate(client, tcfg, msg()), null, "no mention, no reply");
+  assert.strictEqual(evaluate(client, tcfg, msg({ author: { id: "rando", bot: false }, ...mention })), null, "stranger");
+
+  // bare mention with no live run -> fresh, with a freshly minted runId
+  const fresh = evaluate(client, tcfg, msg(mention));
+  assert.strictEqual(fresh.mode, "fresh");
+  assert.strictEqual(fresh.tier, "dev");
+  assert.match(fresh.run.runId, /^[0-9a-f-]{36}$/);
+  assert.strictEqual(fresh.run.sessionId, null);
+  assert.notStrictEqual(evaluate(client, tcfg, msg(mention)).run.runId, fresh.run.runId, "runId is per-trigger");
+
+  // once a run exists, a bare mention resumes the channel's latest
+  sessions.recordRun(fresh.run.runId, { channelId: "CH", guildId: "G", tier: "dev" }, 6 * HOUR);
+  sessions.recordSession(fresh.run.runId, "sess-A", 6 * HOUR);
+  sessions.recordMessage(fresh.run.runId, "BOTMSG", 6 * HOUR);
+
+  const again = evaluate(client, tcfg, msg(mention));
+  assert.strictEqual(again.mode, "resume");
+  assert.strictEqual(again.run.sessionId, "sess-A");
+
+  // an unpinged reply to one of the run's messages is a trigger on its own
+  const reply = evaluate(client, tcfg, msg({ reference: { messageId: "BOTMSG" } }));
+  assert.strictEqual(reply.mode, "resume");
+  assert.strictEqual(reply.run.runId, fresh.run.runId);
+  // ...but only to a message we actually posted
+  assert.strictEqual(evaluate(client, tcfg, msg({ reference: { messageId: "SOMEONE-ELSE" } })), null);
+  // ...and never for a stranger
+  assert.strictEqual(
+    evaluate(client, tcfg, msg({ author: { id: "rando", bot: false }, reference: { messageId: "BOTMSG" } })),
+    null,
+    "stranger follow-up",
+  );
+
+  // a chat user replying into a dev conversation is restricted to chat
+  const crossTier = evaluate(client, tcfg, msg({ author: { id: "u9", bot: false }, channelId: "c1", reference: { messageId: "BOTMSG" } }));
+  assert.strictEqual(crossTier.mode, "resume");
+  assert.strictEqual(crossTier.tier, "chat", "resume must use the current author's tier");
+  assert.strictEqual(crossTier.run.sessionId, "sess-A");
+
+  fs.writeFileSync(process.env.NEATZ_STATE_FILE, JSON.stringify({ runs: {}, byMessage: {}, latestByChannel: {} }));
+}
+
+// ---- tier flags reach the harness argv ---------------------------------------
+{
+  const args = claude.argv(cfg.harness, { tier: "chat", addDirs: ["D1", "D2"] });
+  assert.deepStrictEqual(args.slice(0, 4), ["-p", "--output-format", "stream-json", "--verbose"]);
+  // separate elements, never comma-joined — `--allowedTools` takes them greedily
+  assert.ok(args.includes("--permission-mode") && args[args.indexOf("--permission-mode") + 1] === "dontAsk");
+  const allowed = args.slice(args.indexOf("--allowedTools") + 1, args.indexOf("--add-dir"));
+  assert.ok(allowed.includes("Read") && allowed.includes("Bash(git log*)"), "read tools missing");
+  assert.ok(allowed.includes("mcp__discord-mcp__read_messages"), "discord read tools missing");
+  assert.ok(!allowed.some((a) => a.includes(",")), "allowed tools were comma-joined");
+  assert.ok(
+    !allowed.some((a) => a === "mcp__discord-mcp__*" || a === "mcp__discord-mcp__send_message"),
+    "chat tier must not be able to post to Discord directly",
+  );
+  assert.ok(!allowed.some((a) => ["Edit", "Write", "Bash"].includes(a)), "chat tier must not get write tools");
+  assert.deepStrictEqual(args.slice(-4), ["--add-dir", "D1", "--add-dir", "D2"]);
+
+  const dev = claude.argv(cfg.harness, { tier: "dev", resumeId: "S" });
+  assert.deepStrictEqual(dev, [
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--permission-mode",
+    "bypassPermissions",
+    "--resume",
+    "S",
+  ]);
+  // the tier flags are always followed by another flag, so greedy --allowedTools stops
+  const chatResume = claude.argv(cfg.harness, { tier: "chat", resumeId: "S" });
+  assert.strictEqual(chatResume[chatResume.length - 2], "--resume");
+}
 
 // ---- prompt parity vs pre-refactor index.js ----------------------------------
 // Verbatim copies of the old logic (git show HEAD:index.js), run against the
@@ -180,7 +357,6 @@ function fakeConversation(guildId) {
 }
 
 (async () => {
-  const { evaluate } = require("../src/triggers");
   const client = { user: { id: "bot" } };
   const templates = {
     fresh: fs.readFileSync(path.join(ROOT, "work-order.md"), "utf8"),
@@ -193,7 +369,12 @@ function fakeConversation(guildId) {
     message.member = null;
     const match = evaluate(client, cfg, message);
     assert.ok(match, `evaluate returned null for guild ${guildId}`);
-    assert.deepStrictEqual(match.project, PROJECTS[guildId], "config does not reproduce the old PROJECTS entry");
+    assert.strictEqual(match.tier, "dev");
+
+    const project = projectFor(cfg, message);
+    const { manifest, addDirs, ...single } = project;
+    assert.deepStrictEqual(single, PROJECTS[guildId], "config does not reproduce the old PROJECTS entry");
+    assert.deepStrictEqual(addDirs, [], "single-repo guilds offer nothing extra");
 
     for (const backscroll of [true, false]) {
       const ctxNew = await gatherContext(cfg, message, { backscroll });
@@ -201,7 +382,7 @@ function fakeConversation(guildId) {
       assert.strictEqual(ctxNew, ctxOld, "context text differs");
       for (const t of [templates.fresh, templates.followup]) {
         assert.strictEqual(
-          fill(t, match.project, message, ctxNew),
+          fill(t, project, message, ctxNew),
           oldFill(t, PROJECTS[guildId], message, ctxOld),
           "filled prompt differs from pre-refactor output",
         );
@@ -215,5 +396,25 @@ function fakeConversation(guildId) {
   stranger.mentions = { users: { has: () => true } };
   assert.strictEqual(evaluate(client, cfg, stranger), null);
 
+  // ---- chat prompt fill: every slot resolves, nothing leaks ------------------
+  const chat = fs.readFileSync(path.join(ROOT, "prompts", "chat.md"), "utf8");
+  const followUp = fs.readFileSync(path.join(ROOT, "prompts", "follow-up.md"), "utf8");
+  const multi = fakeConversation("505102060119916545");
+  const multiCfg = { ...cfg, guilds: { "505102060119916545": { name: "NeatQueue", repos: ["neatqueue", "breaking-point"] } } };
+  const multiProject = projectFor(multiCfg, multi);
+  assert.strictEqual(multiProject.repo, cfg.repos.neatqueue.path, "cwd is the first offered repo");
+  assert.deepStrictEqual(multiProject.addDirs, [cfg.repos["breaking-point"].path], "the rest become --add-dir");
+  for (const name of ["neatqueue", "breaking-point"]) assert.ok(multiProject.manifest.includes(`### ${name}`));
+  assert.ok(multiProject.manifest.includes(cfg.repos.neatqueue.description), "manifest carries the routing description");
+
+  const ctx = await gatherContext(cfg, multi, { backscroll: true });
+  for (const t of [chat, followUp]) {
+    const out = fill(t, multiProject, multi, ctx);
+    assert.ok(!/\{[A-Z_]+\}/.test(out), `unfilled placeholder in prompt: ${out.match(/\{[A-Z_]+\}/)}`);
+    assert.ok(out.includes(multi.content) && out.includes("#general"));
+  }
+  assert.ok(fill(chat, multiProject, multi, ctx).includes(cfg.repos["breaking-point"].path), "manifest missing from chat prompt");
+
+  fs.rmSync(TMP, { recursive: true, force: true });
   console.log("smoke ok");
 })();

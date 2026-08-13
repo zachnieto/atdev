@@ -4,10 +4,13 @@
 //  - Reply-chain: if the mention is a Discord reply, the referenced chain is
 //    included in the prompt.
 //  - Backscroll: the last ~10 channel messages are included in fresh prompts.
-//  - Session resume: each channel keeps its session for sessionTtlHours;
-//    follow-up mentions resume it (full conversational memory) instead of
-//    starting cold. The session ID is saved at run *start* (init event), so a
-//    crashed run is still resumable.
+//  - Session resume: a run keeps its session for sessionTtlHours; a follow-up
+//    (unpinged reply to one of its messages, or a bare re-mention in the
+//    channel) resumes it with full conversational memory instead of starting
+//    cold. The session ID is saved at run *start* (init event), so a crashed
+//    run is still resumable.
+//  - Tiers: `dev` may change code; `chat` is read-only, enforced by the
+//    harness flags in config.harness.tierArgs — never by the prompt alone.
 //  - Multi-message replies: the agent may emit several <reply> blocks; each is
 //    posted as its own message. Nothing is hard-truncated — oversized blocks
 //    are split at line boundaries as a last resort.
@@ -17,10 +20,10 @@ const path = require("node:path");
 const { DEFAULTS, ROOT } = require("./config");
 const { log } = require("./log");
 const { StatusReporter, describeToolUse } = require("./status");
-const { saveSession, resumableSession } = require("./sessions");
+const { recordRun, recordSession, recordMessage } = require("./sessions");
 const claude = require("./runners/claude");
 
-// ---- per-repo serialization (two mentions must not race on git state) --------
+// ---- serialization -----------------------------------------------------------
 const queues = new Map();
 function enqueue(key, job) {
   const prev = queues.get(key) || Promise.resolve();
@@ -85,11 +88,45 @@ async function gatherContext(config, message, { backscroll }) {
 }
 
 // ---- prompts -----------------------------------------------------------------
-const TEMPLATE_FRESH = fs.readFileSync(path.join(ROOT, "work-order.md"), "utf8");
-const TEMPLATE_FOLLOWUP = fs.readFileSync(path.join(ROOT, "follow-up.md"), "utf8");
+// Dev fresh still uses the single-repo work order at the repo root; the
+// manifest-driven prompts/work-order.md lands with worktrees in Phase 4.
+const TEMPLATE_DEV = fs.readFileSync(path.join(ROOT, "work-order.md"), "utf8");
+const TEMPLATE_CHAT = fs.readFileSync(path.join(ROOT, "prompts", "chat.md"), "utf8");
+const TEMPLATE_FOLLOWUP = fs.readFileSync(path.join(ROOT, "prompts", "follow-up.md"), "utf8");
 
 function permalink(message) {
   return `https://discord.com/channels/${message.guildId}/${message.channelId}/${message.id}`;
+}
+
+// The repos a guild offers, in config order; the first one is the run's cwd.
+function reposFor(config, message) {
+  const names = config.guilds[message.guildId]?.repos?.length
+    ? config.guilds[message.guildId].repos
+    : Object.keys(config.repos);
+  return names.map((name) => ({ name, ...config.repos[name] }));
+}
+
+function renderManifest(repos) {
+  return repos
+    .map((r) =>
+      [`### ${r.name}`, `- path: ${r.path}`, `- base: ${r.base}`, `- description: ${r.description ?? ""}`, `- notes: ${r.notes ?? ""}`].join(
+        "\n",
+      ),
+    )
+    .join("\n\n");
+}
+
+function projectFor(config, message) {
+  const repos = reposFor(config, message);
+  const [first] = repos;
+  return {
+    name: config.guilds[message.guildId]?.name,
+    repo: first.path,
+    prNote: first.notes ?? "",
+    base: first.base,
+    manifest: renderManifest(repos),
+    addDirs: repos.slice(1).map((r) => r.path),
+  };
 }
 
 function fill(template, project, message, context) {
@@ -98,6 +135,7 @@ function fill(template, project, message, context) {
     .replaceAll("{REPO}", project.repo)
     .replaceAll("{PR_NOTE}", project.prNote)
     .replaceAll("{BASE}", project.base)
+    .replaceAll("{REPOS_MANIFEST}", project.manifest ?? "")
     .replaceAll("{CHANNEL}", message.channel?.name ?? message.channelId)
     .replaceAll("{PERMALINK}", permalink(message))
     .replaceAll("{CONTEXT}", context)
@@ -145,30 +183,44 @@ function extractReplies(text, limit = DEFAULTS.replyLimit, maxMessages = DEFAULT
 }
 
 // Post reply chunks as a chain: first replies to the mention (with ping), each
-// subsequent chunk replies to the previous one (no ping).
+// subsequent chunk replies to the previous one (no ping). Returns the posted
+// messages so the caller can register them as follow-up handles.
 async function postReplies(message, chunks) {
+  const posted = [];
   let target = message;
-  let first = true;
   for (const chunk of chunks) {
-    target = await target.reply({ content: chunk, allowedMentions: { repliedUser: first } });
-    first = false;
+    target = await target.reply({ content: chunk, allowedMentions: { repliedUser: posted.length === 0 } });
+    posted.push(target);
   }
+  return posted;
 }
 
 // ---- the run ----------------------------------------------------------------
-async function startRun(config, message, { project, tier }) {
-  log(`Work order from ${message.author.username} in ${project.name}#${message.channel?.name}: ${message.content.slice(0, 200)}`);
+async function startRun(config, message, { tier, mode, run }) {
+  const { runId } = run;
+  const project = projectFor(config, message);
+  const ttlMs = config.sessionTtlHours * 60 * 60 * 1000;
+  log(
+    `${tier}/${mode} run ${runId} from ${message.author.username} in ${project.name}#${message.channel?.name}: ${message.content.slice(0, 200)}`,
+  );
   await message.react("👀").catch(() => {});
 
-  return enqueue(project.repo, async () => {
+  // Serialize whatever shares a working tree. Dev runs all edit the guild's one
+  // checkout, so they queue on it; chat runs are read-only and only queue
+  // against their own follow-ups. Phase 4's worktrees drop the dev case.
+  const queueKey = tier === "dev" ? project.repo : runId;
+
+  return enqueue(queueKey, async () => {
     const started = Date.now();
-    const resumeId = resumableSession(message.channelId, config.sessionTtlHours * 60 * 60 * 1000);
+    recordRun(runId, { channelId: message.channelId, guildId: message.guildId, tier }, ttlMs);
+    const track = (m) => m && recordMessage(runId, m.id, ttlMs);
 
     const reporter = new StatusReporter(message, config);
     await reporter.start();
+    track(reporter.statusMsg);
     const onEvent = (ev) => {
       // Save at run start so a crashed run is still resumable.
-      if (ev.type === "init") saveSession(message.channelId, ev.sessionId);
+      if (ev.type === "init") recordSession(runId, ev.sessionId, ttlMs);
       if (ev.type === "tool") {
         const d = describeToolUse(ev.name, ev.input);
         if (d) reporter.tool(d);
@@ -177,16 +229,25 @@ async function startRun(config, message, { project, tier }) {
         reporter.note(`» ${ev.text.replace(/\s+/g, " ").trim().slice(0, 110)}`);
       }
     };
-    const run = (prompt, resume) =>
-      claude.run({ harness: config.harness, cwd: project.repo, prompt, resumeId: resume, tier, onEvent });
+    const spawn = (prompt, resume) =>
+      claude.run({
+        harness: config.harness,
+        cwd: project.repo,
+        prompt,
+        resumeId: resume,
+        tier,
+        // Chat reads across every repo the guild offers; dev stays in its checkout.
+        addDirs: tier === "chat" ? project.addDirs : [],
+        onEvent,
+      });
 
     let res;
-    if (resumeId) {
-      // Follow-up: resume the channel's session; lean prompt, reply-chain only
+    if (mode === "resume" && run.sessionId) {
+      // Follow-up: resume this run's session; lean prompt, reply-chain only
       // (the session already has the earlier context).
       const context = await gatherContext(config, message, { backscroll: false });
-      log(`Resuming session ${resumeId} for #${message.channel?.name}`);
-      res = await run(fill(TEMPLATE_FOLLOWUP, project, message, context), resumeId);
+      log(`Resuming session ${run.sessionId} for run ${runId}`);
+      res = await spawn(fill(TEMPLATE_FOLLOWUP, project, message, context), run.sessionId);
       if (res.code !== 0) {
         log(`Resume failed (exit ${res.code}); retrying as a fresh session. ${res.err.slice(0, 200)}`);
         reporter.note("resume failed — restarting as a fresh session");
@@ -195,29 +256,41 @@ async function startRun(config, message, { project, tier }) {
     }
     if (!res) {
       const context = await gatherContext(config, message, { backscroll: true });
-      res = await run(fill(TEMPLATE_FRESH, project, message, context), null);
+      res = await spawn(fill(tier === "chat" ? TEMPLATE_CHAT : TEMPLATE_DEV, project, message, context), null);
     }
 
     const mins = ((Date.now() - started) / 60000).toFixed(1);
-    log(`Run finished in ${mins}min (exit ${res.code}, session ${res.sessionId ?? "?"}) for message ${message.id}`);
+    log(`Run ${runId} finished in ${mins}min (exit ${res.code}, session ${res.sessionId ?? "?"}) for message ${message.id}`);
 
     if (res.code === 0 && res.text) {
-      if (res.sessionId) saveSession(message.channelId, res.sessionId);
+      if (res.sessionId) recordSession(runId, res.sessionId, ttlMs);
       await reporter.finish(`✅ **Done** in ${mins}min`);
       await message.react("✅").catch(() => {});
-      await postReplies(message, extractReplies(res.text, config.replyLimit, config.maxReplyMessages));
+      for (const m of await postReplies(message, extractReplies(res.text, config.replyLimit, config.maxReplyMessages))) track(m);
     } else {
       log(`Run error output: ${(res.err || res.text).slice(0, 500)}`);
       await reporter.finish(`❌ **Failed** (exit ${res.code}) after ${mins}min`);
       await message.react("❌").catch(() => {});
       const errTail = (res.err || res.text || "").trim().slice(-400).replaceAll("```", "'''");
       const detail = errTail ? `\n\`\`\`\n${errTail}\n\`\`\`` : "";
-      await message.reply({
-        content: `⚠️ The agent run failed (exit ${res.code}).${detail}`,
-        allowedMentions: { repliedUser: true },
-      });
+      track(
+        await message.reply({
+          content: `⚠️ The agent run failed (exit ${res.code}).${detail}`,
+          allowedMentions: { repliedUser: true },
+        }),
+      );
     }
   });
 }
 
-module.exports = { startRun, enqueue, gatherContext, fill, extractReplies, splitForDiscord, postReplies };
+module.exports = {
+  startRun,
+  enqueue,
+  gatherContext,
+  fill,
+  projectFor,
+  renderManifest,
+  extractReplies,
+  splitForDiscord,
+  postReplies,
+};

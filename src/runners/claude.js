@@ -8,12 +8,21 @@
 const { spawn, execFile } = require("node:child_process");
 const { log } = require("../log");
 
+// The tier's flags are what actually restrict a chat run — the prompt only
+// explains the restriction. `--allowedTools` takes its values greedily, so the
+// tier flags must be followed by another flag (they are) and the prompt must go
+// in over stdin, never as a positional argument.
+function argv(harness, { tier = "dev", resumeId, addDirs = [] } = {}) {
+  const args = ["-p", "--output-format", "stream-json", "--verbose", ...(harness.args ?? []), ...(harness.tierArgs?.[tier] ?? [])];
+  if (resumeId) args.push("--resume", resumeId);
+  for (const dir of addDirs) args.push("--add-dir", dir);
+  return args;
+}
+
 // run({...}) -> {code, text, sessionId, err}
 function run({ harness, cwd, prompt, resumeId, tier = "dev", env, addDirs = [], onEvent }) {
   return new Promise((resolve) => {
-    const args = ["-p", "--output-format", "stream-json", "--verbose", ...(harness.args ?? []), ...(harness.tierArgs?.[tier] ?? [])];
-    if (resumeId) args.push("--resume", resumeId);
-    for (const dir of addDirs) args.push("--add-dir", dir);
+    const args = argv(harness, { tier, resumeId, addDirs });
     const timeoutMs = (harness.timeoutMinutes ?? 45) * 60 * 1000;
     const proc = spawn(harness.command, args, {
       cwd,
@@ -80,4 +89,4 @@ function run({ harness, cwd, prompt, resumeId, tier = "dev", env, addDirs = [], 
   });
 }
 
-module.exports = { run };
+module.exports = { run, argv };
