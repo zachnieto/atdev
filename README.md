@@ -143,11 +143,11 @@ it's the one thing dev runs get that chat runs don't.
 Developed and run Windows-first: the timeout kill path uses `taskkill /T /F`, and
 worktree removal retries on `EBUSY` (Windows can hold file handles open briefly after
 a process exits). A POSIX kill path (`SIGKILL`) exists in `src/runners/claude.js` for
-other platforms but is less exercised. Autostart on Windows follows the
-`run-neatz-bot.cmd` / `run-neatz-bot.vbs` pattern: a `.cmd` that `cd`s into the repo
-and runs `node index.js`, wrapped in a `.vbs` that launches it hidden (no console
-flash) — point Task Scheduler at the `.vbs`. The bot's own singleton lock
-(`config.lockPort`) makes re-triggering that launcher harmless.
+other platforms but is less exercised. For autostart on Windows, use a `.cmd` that
+`cd`s into the repo and runs `node index.js` (appending stdout to a log), wrapped in
+a `.vbs` one-liner that launches it hidden (no console flash) — point Task Scheduler
+at the `.vbs`. The bot's own singleton lock (`config.lockPort`) makes re-triggering
+that launcher harmless.
 
 ## Adding a second harness
 

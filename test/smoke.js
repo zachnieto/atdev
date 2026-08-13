@@ -51,8 +51,14 @@ assert.deepStrictEqual(extractReplies("<reply>   </reply>"), ["(empty reply)"]);
 const cfg = loadConfig();
 assert.strictEqual(cfg.lockPort, 47391);
 assert.strictEqual(cfg.harness.timeoutMinutes, 45);
-assert.strictEqual(cfg.repos.neatqueue.path, "C:/Users/zachn/IdeaProjects/neatqueue"); // absolute paths pass through unmangled
 assert.strictEqual(cfg.replyLimit, 1900);
+// Everything below derives repo/guild names from the loaded config so this file
+// carries no machine paths or real IDs.
+const [R1, R2] = Object.keys(cfg.repos);
+const [G1] = Object.keys(cfg.guilds);
+// absolute paths pass through unmangled (compare against the raw file)
+const rawCfg = JSON.parse(fs.readFileSync(path.join(ROOT, "config.json"), "utf8"));
+assert.strictEqual(cfg.repos[R1].path, rawCfg.repos[R1].path);
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "atdev-cfg-"));
 assert.throws(() => loadConfig(path.join(tmp, "nope.json")), /config not found/);
@@ -79,7 +85,7 @@ fs.rmSync(tmp, { recursive: true, force: true });
 
 // ---- access rules (today's single user->dev rule reproduces the old gate) -----
 const msgFrom = (id) => ({ author: { id }, channelId: "c", guildId: "g", member: null });
-assert.strictEqual(matchAccess(cfg.access, msgFrom("145305657237700608")).tier, "dev");
+assert.strictEqual(matchAccess(cfg.access, msgFrom(cfg.access[0].user)).tier, "dev");
 assert.strictEqual(matchAccess(cfg.access, msgFrom("999")), null);
 
 // every specified key must match; ordered, first match wins
@@ -160,7 +166,7 @@ assert.strictEqual(matchAccess(RULES, mk()), null, "stranger");
 // ---- trigger evaluation ------------------------------------------------------
 {
   const client = { user: { id: "BOT" } };
-  const tcfg = { ...cfg, sessionTtlHours: 6, guilds: { G: { name: "T", repos: ["neatqueue"] } }, access: RULES };
+  const tcfg = { ...cfg, sessionTtlHours: 6, guilds: { G: { name: "T", repos: [R1] } }, access: RULES };
   const msg = (over = {}) => ({
     inGuild: () => true,
     author: { id: "u1", bot: false },
@@ -254,27 +260,19 @@ assert.strictEqual(matchAccess(RULES, mk()), null, "stranger");
 // ---- prompt parity vs pre-refactor index.js ----------------------------------
 // Verbatim copies of the old logic (git show HEAD:index.js), run against the
 // same fake message; filled prompts must be byte-identical.
-const NEATZ_ID = "145305657237700608";
+// Operator identity and per-guild project entries come from the loaded config so
+// this file carries no hardcoded IDs or machine paths.
+const OPERATOR = cfg.access[0]; // { user, name, tier: "dev" }
 const REPLY_CHAIN_MAX = 5;
 const BACKSCROLL_COUNT = 10;
-const PROJECTS = {
-  "505102060119916545": {
-    name: "NeatQueue",
-    repo: "C:/Users/zachn/IdeaProjects/neatqueue",
-    prNote:
-      "PRs target `develop` on zachnieto/neatqueue (`gh pr create --base develop`). Deployed paths `/neatqueue/...` map to local `discord-bot/`.",
-    base: "origin/develop",
-  },
-  "700622160992927774": {
-    name: "Breaking Point",
-    repo: "C:/Users/zachn/IdeaProjects/breaking-point-mono",
-    prNote:
-      "Monorepo Breaking-Point/breaking-point (`gh pr create --repo Breaking-Point/breaking-point`). Biome is the lint gate; `yarn typecheck` has pre-existing failures and is not blocking.",
-    base: "origin/dev",
-  },
-};
+const PROJECTS = Object.fromEntries(
+  Object.entries(cfg.guilds).map(([guildId, g]) => {
+    const r = cfg.repos[g.repos[0]];
+    return [guildId, { name: g.name, repo: r.path, prNote: r.notes, base: r.base }];
+  }),
+);
 function oldFmtMsg(m) {
-  const who = `${m.author.username}${m.author.id === NEATZ_ID ? " (NeatZ)" : ""}${m.author.bot ? " [bot]" : ""}`;
+  const who = `${m.author.username}${m.author.id === OPERATOR.user ? ` (${OPERATOR.name})` : ""}${m.author.bot ? " [bot]" : ""}`;
   const body = (m.content || "[embed/attachment]").replace(/\s+/g, " ").slice(0, 300);
   return `${who}: ${body}`;
 }
@@ -335,14 +333,14 @@ function fakeConversation(guildId) {
   const mk = (id, username, authorId, content, refId) => ({
     id,
     guildId,
-    channelId: "910981294937210930",
+    channelId: "1000",
     content,
     author: { id: authorId, username, bot: username === "somebot" },
     reference: refId ? { messageId: refId } : undefined,
   });
-  const parent = mk("1", "NeatZ", NEATZ_ID, "the original    question");
+  const parent = mk("1", OPERATOR.name, OPERATOR.user, "the original    question");
   const scroll = [mk("2", "friend", "777", "chatter here"), mk("3", "somebot", "888", "")];
-  const message = mk("9", "NeatZ", NEATZ_ID, "@bot please fix the thing", "1");
+  const message = mk("9", OPERATOR.name, OPERATOR.user, "@bot please fix the thing", "1");
   const channel = {
     name: "general",
     messages: {
@@ -393,7 +391,7 @@ function fakeConversation(guildId) {
     }
   }
   // unauthorized author -> ignored, exactly as before
-  const stranger = fakeConversation("505102060119916545");
+  const stranger = fakeConversation(G1);
   stranger.author = { id: "999", username: "rando", bot: false };
   stranger.inGuild = () => true;
   stranger.mentions = { users: { has: () => true } };
@@ -402,13 +400,13 @@ function fakeConversation(guildId) {
   // ---- chat prompt fill: every slot resolves, nothing leaks ------------------
   const chat = fs.readFileSync(path.join(ROOT, "prompts", "chat.md"), "utf8");
   const followUp = fs.readFileSync(path.join(ROOT, "prompts", "follow-up.md"), "utf8");
-  const multi = fakeConversation("505102060119916545");
-  const multiCfg = { ...cfg, guilds: { "505102060119916545": { name: "NeatQueue", repos: ["neatqueue", "breaking-point"] } } };
+  const multi = fakeConversation(G1);
+  const multiCfg = { ...cfg, guilds: { [G1]: { name: "multi", repos: [R1, R2] } } };
   const multiProject = projectFor(multiCfg, multi);
-  assert.strictEqual(multiProject.repo, cfg.repos.neatqueue.path, "cwd is the first offered repo");
-  assert.deepStrictEqual(multiProject.addDirs, [cfg.repos["breaking-point"].path], "the rest become --add-dir");
-  for (const name of ["neatqueue", "breaking-point"]) assert.ok(multiProject.manifest.includes(`### ${name}`));
-  assert.ok(multiProject.manifest.includes(cfg.repos.neatqueue.description), "manifest carries the routing description");
+  assert.strictEqual(multiProject.repo, cfg.repos[R1].path, "cwd is the first offered repo");
+  assert.deepStrictEqual(multiProject.addDirs, [cfg.repos[R2].path], "the rest become --add-dir");
+  for (const name of [R1, R2]) assert.ok(multiProject.manifest.includes(`### ${name}`));
+  assert.ok(multiProject.manifest.includes(cfg.repos[R1].description), "manifest carries the routing description");
 
   const ctx = await gatherContext(cfg, multi, { backscroll: true });
   for (const t of [chat, followUp]) {
@@ -416,7 +414,7 @@ function fakeConversation(guildId) {
     assert.ok(!/\{[A-Z_]+\}/.test(out), `unfilled placeholder in prompt: ${out.match(/\{[A-Z_]+\}/)}`);
     assert.ok(out.includes(multi.content) && out.includes("#general"));
   }
-  assert.ok(fill(chat, multiProject, multi, ctx).includes(cfg.repos["breaking-point"].path), "manifest missing from chat prompt");
+  assert.ok(fill(chat, multiProject, multi, ctx).includes(cfg.repos[R2].path), "manifest missing from chat prompt");
 
   // ---- dev prompt fill: manifest + workflow notes ----------------------------
   {
@@ -426,13 +424,13 @@ function fakeConversation(guildId) {
     assert.ok(!/\{[A-Z_]+\}/.test(withNotes), `unfilled placeholder: ${withNotes.match(/\{[A-Z_]+\}/)}`);
     assert.ok(withNotes.includes(cfg.workflowNotes.trim()), "workflow notes missing");
     assert.ok(withNotes.includes("## Workflow notes"), "heading dropped while notes exist");
-    assert.ok(withNotes.includes("ATDEV_WORKTREE_HELPER") && withNotes.includes("### neatqueue"), "worktree/manifest sections missing");
+    assert.ok(withNotes.includes("ATDEV_WORKTREE_HELPER") && withNotes.includes(`### ${R1}`), "worktree/manifest sections missing");
 
     // empty notes: the placeholder AND its now-pointless heading both go
     const without = fill(work, { ...multiProject, workflowNotes: "" }, multi, ctx);
     assert.ok(!/\{[A-Z_]+\}/.test(without), `unfilled placeholder: ${without.match(/\{[A-Z_]+\}/)}`);
     assert.ok(!without.includes("Workflow notes"), "dangling heading left behind");
-    assert.ok(without.includes("### neatqueue"), "rest of the prompt survived the strip");
+    assert.ok(without.includes(`### ${R1}`), "rest of the prompt survived the strip");
   }
 
   // ---- worktrees: registry + lifecycle against a real git repo ---------------
@@ -523,7 +521,7 @@ function fakeConversation(guildId) {
     let r = cli(["create", "../../etc"], withRun);
     assert.strictEqual(r.code, 1);
     assert.match(r.stderr, /unknown repo/, "arbitrary paths must be rejected");
-    r = cli(["create", "neatqueue"], { ATDEV_RUN_ID: "" });
+    r = cli(["create", R1], { ATDEV_RUN_ID: "" });
     assert.strictEqual(r.code, 1);
     assert.match(r.stderr, /ATDEV_RUN_ID/, "missing run id must be rejected");
     r = cli([], withRun);
