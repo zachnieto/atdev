@@ -19,7 +19,7 @@ const { execFileSync } = require("node:child_process");
 const { ROOT, loadConfig } = require("./config");
 const { log } = require("./log");
 
-const STATE_FILE = process.env.NEATZ_WORKTREE_FILE || path.join(ROOT, "state", "worktrees.json");
+const STATE_FILE = process.env.ATDEV_WORKTREE_FILE || path.join(ROOT, "state", "worktrees.json");
 
 // ponytail: plain read-modify-write, last writer wins. The contention window is
 // milliseconds (one create + one markRunEnded per run) and sweep() collects any

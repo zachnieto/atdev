@@ -18,7 +18,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { ROOT } = require("./config");
 
-const STATE_FILE = process.env.NEATZ_STATE_FILE || path.join(ROOT, "state", "sessions.json");
+const STATE_FILE = process.env.ATDEV_STATE_FILE || path.join(ROOT, "state", "sessions.json");
 const GRACE_MS = 24 * 60 * 60 * 1000;
 fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
 

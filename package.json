@@ -1,8 +1,8 @@
 {
-  "name": "neatz-bot",
+  "name": "atdev",
   "version": "1.0.0",
   "private": true,
-  "description": "Mention listener: @NeatZ - MCP mentions from NeatZ trigger a headless Claude Code run against the right repo/beads board and reply with the result.",
+  "description": "Mention-driven Discord agent teammate: @mention it to spawn a headless Claude Code run against your repos, with a built-in Discord MCP server.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"

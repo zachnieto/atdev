@@ -12,9 +12,9 @@ const path = require("node:path");
 
 // Must be set before src/sessions.js and src/worktrees.js load — production
 // state stays untouched.
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "neatz-test-"));
-process.env.NEATZ_STATE_FILE = path.join(TMP, "sessions.json");
-process.env.NEATZ_WORKTREE_FILE = path.join(TMP, "worktrees.json");
+const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "atdev-test-"));
+process.env.ATDEV_STATE_FILE = path.join(TMP, "sessions.json");
+process.env.ATDEV_WORKTREE_FILE = path.join(TMP, "worktrees.json");
 
 const { execFileSync } = require("node:child_process");
 const { loadConfig, ROOT } = require("../src/config");
@@ -54,7 +54,7 @@ assert.strictEqual(cfg.harness.timeoutMinutes, 45);
 assert.strictEqual(cfg.repos.neatqueue.path, "C:/Users/zachn/IdeaProjects/neatqueue"); // absolute paths pass through unmangled
 assert.strictEqual(cfg.replyLimit, 1900);
 
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "neatz-cfg-"));
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "atdev-cfg-"));
 assert.throws(() => loadConfig(path.join(tmp, "nope.json")), /config not found/);
 const bad = (obj) => {
   const f = path.join(tmp, "bad.json");
@@ -112,9 +112,9 @@ assert.strictEqual(matchAccess(RULES, mk()), null, "stranger");
   const empty = { runs: {}, byMessage: {}, latestByChannel: {} };
 
   // a pre-Phase-3 (channel-keyed) file is discarded, not migrated
-  fs.writeFileSync(process.env.NEATZ_STATE_FILE, JSON.stringify({ "123": { sessionId: "old", updatedAt: Date.now() } }));
+  fs.writeFileSync(process.env.ATDEV_STATE_FILE, JSON.stringify({ "123": { sessionId: "old", updatedAt: Date.now() } }));
   assert.deepStrictEqual(sessions.load(ttl), empty, "old schema not discarded");
-  fs.writeFileSync(process.env.NEATZ_STATE_FILE, "{not json");
+  fs.writeFileSync(process.env.ATDEV_STATE_FILE, "{not json");
   assert.deepStrictEqual(sessions.load(ttl), empty, "corrupt file not tolerated");
 
   sessions.recordRun("R1", { channelId: "CH", guildId: "G", tier: "dev" }, ttl);
@@ -145,7 +145,7 @@ assert.strictEqual(matchAccess(RULES, mk()), null, "stranger");
   const age = (ms) => {
     const st = sessions.load(ttl);
     st.runs.R1.updatedAt = Date.now() - ms;
-    fs.writeFileSync(process.env.NEATZ_STATE_FILE, JSON.stringify(st));
+    fs.writeFileSync(process.env.ATDEV_STATE_FILE, JSON.stringify(st));
   };
   age(7 * HOUR);
   assert.strictEqual(sessions.runByMessage("M-reply", ttl), null, "stale run resumed");
@@ -215,7 +215,7 @@ assert.strictEqual(matchAccess(RULES, mk()), null, "stranger");
   assert.strictEqual(crossTier.tier, "chat", "resume must use the current author's tier");
   assert.strictEqual(crossTier.run.sessionId, "sess-A");
 
-  fs.writeFileSync(process.env.NEATZ_STATE_FILE, JSON.stringify({ runs: {}, byMessage: {}, latestByChannel: {} }));
+  fs.writeFileSync(process.env.ATDEV_STATE_FILE, JSON.stringify({ runs: {}, byMessage: {}, latestByChannel: {} }));
 }
 
 // ---- tier flags reach the harness argv ---------------------------------------
@@ -267,10 +267,10 @@ const PROJECTS = {
   },
   "700622160992927774": {
     name: "Breaking Point",
-    repo: "C:/Users/zachn/IdeaProjects/breaking-point",
+    repo: "C:/Users/zachn/IdeaProjects/breaking-point-mono",
     prNote:
       "Monorepo Breaking-Point/breaking-point (`gh pr create --repo Breaking-Point/breaking-point`). Biome is the lint gate; `yarn typecheck` has pre-existing failures and is not blocking.",
-    base: "the default branch",
+    base: "origin/dev",
   },
 };
 function oldFmtMsg(m) {
@@ -487,7 +487,7 @@ function fakeConversation(guildId) {
     // sweep: past TTL goes regardless of status, and untracked dirs go too
     const reg = worktrees.load();
     reg["tmp-abcdef12"].createdAt = new Date(Date.now() - 48 * HOUR).toISOString();
-    fs.writeFileSync(process.env.NEATZ_WORKTREE_FILE, JSON.stringify(reg));
+    fs.writeFileSync(process.env.ATDEV_WORKTREE_FILE, JSON.stringify(reg));
     const orphan = path.join(wtRoot, "tmp-deadbeef");
     fs.mkdirSync(orphan, { recursive: true });
     fs.writeFileSync(path.join(orphan, "junk.txt"), "x");

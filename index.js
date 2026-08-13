@@ -1,4 +1,4 @@
-// neatz-bot — Discord mention listener that triggers headless Claude Code runs.
+// atdev — Discord mention listener that triggers headless Claude Code runs.
 //
 // Flow: an authorized user (config.access) @mentions the bot in a mapped guild
 // -> react 👀 -> spawn the harness in that guild's repo with a work-order
@@ -71,7 +71,7 @@ if (require.main === module) {
   const lock = net.createServer();
   lock.on("error", (err) => {
     if (err.code === "EADDRINUSE") {
-      console.log("neatz-bot already running; exiting.");
+      console.log("atdev already running; exiting.");
       process.exit(0);
     }
     throw err;
