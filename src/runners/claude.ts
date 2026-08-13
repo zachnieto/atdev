@@ -9,12 +9,19 @@ import { spawn, execFile } from "node:child_process";
 import type { HarnessConfig } from "../config";
 import { log } from "../log";
 
+// Token totals for one run. `input` folds the cache tiers in (cache reads and
+// writes are still input tokens someone paid for).
+export interface RunUsage {
+  input: number;
+  output: number;
+}
+
 // The normalized adapter contract: any second harness emits these same events.
 export type RunnerEvent =
   | { type: "init"; sessionId: string }
   | { type: "tool"; name: string; input: unknown }
   | { type: "text"; text: string }
-  | { type: "result"; isError: boolean; text: string };
+  | { type: "result"; isError: boolean; text: string; usage?: RunUsage; costUsd?: number };
 
 export interface RunOptions {
   harness: HarnessConfig;
@@ -25,6 +32,9 @@ export interface RunOptions {
   env?: Record<string, string>;
   addDirs?: string[];
   onEvent?: (ev: RunnerEvent) => void;
+  // Handed the kill handle for this run's process tree as soon as it spawns,
+  // so the caller can cancel it (same path the timeout uses).
+  onSpawn?: (kill: () => void) => void;
 }
 
 export interface RunResult {
@@ -32,6 +42,8 @@ export interface RunResult {
   text: string;
   sessionId: string | null;
   err: string;
+  usage?: RunUsage;
+  costUsd?: number;
 }
 
 // The tier's flags are what actually restrict a chat run — the prompt only
@@ -67,6 +79,7 @@ export function run({
   env,
   addDirs = [],
   onEvent,
+  onSpawn,
 }: RunOptions): Promise<RunResult> {
   return new Promise((resolve) => {
     const args = argv(harness, { tier, resumeId, addDirs });
@@ -83,6 +96,8 @@ export function run({
     let sessionId: string | null = null;
     let sawResult = false;
     let isError = false;
+    let usage: RunUsage | undefined;
+    let costUsd: number | undefined;
     const emit = (ev: RunnerEvent) => {
       try {
         onEvent?.(ev);
@@ -90,11 +105,16 @@ export function run({
         log(`onEvent error: ${e?.message || e}`);
       }
     };
-    const timer = setTimeout(() => {
-      log(`TIMEOUT after ${timeoutMs / 60000}min; killing pid ${proc.pid}`);
+    // Kills the whole tree: the harness spawns tool subprocesses of its own.
+    const kill = () => {
       if (process.platform === "win32") execFile("taskkill", ["/pid", String(proc.pid), "/T", "/F"], () => {});
       else proc.kill("SIGKILL");
+    };
+    const timer = setTimeout(() => {
+      log(`TIMEOUT after ${timeoutMs / 60000}min; killing pid ${proc.pid}`);
+      kill();
     }, timeoutMs);
+    onSpawn?.(kill);
     proc.stdout!.on("data", (d) => {
       buf += String(d);
       let nl: number;
@@ -121,16 +141,32 @@ export function run({
           sawResult = true;
           isError = !!ev.is_error;
           text = String(ev.result ?? "").trim();
-          emit({ type: "result", isError, text });
+          const u = ev.usage;
+          usage = u
+            ? {
+                input: (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0),
+                output: u.output_tokens ?? 0,
+              }
+            : undefined;
+          costUsd = typeof ev.total_cost_usd === "number" ? ev.total_cost_usd : undefined;
+          emit({ type: "result", isError, text, ...(usage && { usage }), ...(costUsd != null && { costUsd }) });
         }
       }
     });
     proc.stderr!.on("data", (d) => (err += String(d)));
+    // A harness that never starts (bad harness.command) must fail this run, not
+    // the bot: resolve as a failure instead of throwing out of the event loop.
+    proc.on("error", (e: any) => {
+      clearTimeout(timer);
+      log(`Harness spawn failed: ${e?.message || e}`);
+      resolve({ code: null, text, sessionId, err: String(e?.message || e) });
+    });
+    proc.stdin!.on("error", () => {}); // writing to a process that never spawned
     proc.on("close", (code) => {
       clearTimeout(timer);
       // A clean exit without a result event (or a result flagged as error) is a failure.
       const effCode = code !== 0 ? code : sawResult && !isError ? 0 : 1;
-      resolve({ code: effCode, text, sessionId, err: err.trim() });
+      resolve({ code: effCode, text, sessionId, err: err.trim(), usage, costUsd });
     });
     proc.stdin!.write(prompt);
     proc.stdin!.end();

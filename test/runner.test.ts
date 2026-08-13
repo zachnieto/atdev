@@ -58,7 +58,7 @@ const FIXTURE: HarnessConfig = {
   args: [path.join(ROOT, "test", "fixtures", "harness.js")],
   timeoutMinutes: 1,
 };
-const exec = (scenario: string, prompt = "do the thing") => {
+const exec = (scenario: string, prompt = "do the thing", onSpawn?: (kill: () => void) => void) => {
   const events: RunnerEvent[] = [];
   return run({
     harness: FIXTURE,
@@ -66,6 +66,7 @@ const exec = (scenario: string, prompt = "do the thing") => {
     prompt,
     env: { FIXTURE_SCENARIO: scenario },
     onEvent: (e) => events.push(e),
+    onSpawn,
   }).then((res) => ({ res, events }));
 };
 
@@ -115,4 +116,45 @@ test("a nonzero exit keeps its code and carries stderr back", async () => {
   assert.equal(res.code, 3);
   assert.equal(res.err, "boom: the harness died");
   assert.equal(res.text, "");
+});
+
+test("a harness that cannot even spawn fails the run, not the bot", async () => {
+  const res = await run({
+    harness: { command: path.join(TMP, "definitely-not-an-exe"), timeoutMinutes: 1 },
+    cwd: TMP,
+    prompt: "hi",
+  });
+  assert.equal(res.code, null, "a spawn failure has no exit code");
+  assert.match(res.err, /ENOENT|spawn/i);
+  assert.equal(res.text, "");
+});
+
+// ---- usage -------------------------------------------------------------------
+test("the result event's token usage and cost are normalized onto the result", async () => {
+  const { res, events } = await exec("usage");
+  // input folds in the cache tiers: 100 + 20 + 5
+  assert.deepEqual(res.usage, { input: 125, output: 7 });
+  assert.equal(res.costUsd, 0.25);
+  assert.deepEqual(events.at(-1), {
+    type: "result",
+    isError: false,
+    text: "done",
+    usage: { input: 125, output: 7 },
+    costUsd: 0.25,
+  });
+
+  const { res: plain } = await exec("ok"); // a harness that reports nothing
+  assert.equal(plain.usage, undefined);
+  assert.equal(plain.costUsd, undefined);
+});
+
+// ---- cancel ------------------------------------------------------------------
+test("the onSpawn kill handle stops a live run promptly", async () => {
+  const started = Date.now();
+  const { res } = await exec("sleep", "do the thing", (kill) => setTimeout(kill, 200));
+  const took = Date.now() - started;
+  assert.notEqual(res.code, 0, "a killed run must not look successful");
+  assert.equal(res.text, "", "the killed run never produced a result");
+  assert.ok(took < 20000, `kill took ${took}ms — the process outlived its kill handle`);
+  assert.equal(res.sessionId, "sess-1", "a cancelled run is still resumable");
 });

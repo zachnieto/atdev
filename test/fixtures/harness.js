@@ -23,7 +23,8 @@ const assistant = JSON.stringify({
     ],
   },
 });
-const result = (isError, text) => JSON.stringify({ type: "result", session_id: "sess-2", is_error: isError, result: text });
+const result = (isError, text, extra = {}) =>
+  JSON.stringify({ type: "result", session_id: "sess-2", is_error: isError, result: text, ...extra });
 const echo = JSON.stringify({ prompt, argv });
 
 switch (process.env.FIXTURE_SCENARIO) {
@@ -32,6 +33,24 @@ switch (process.env.FIXTURE_SCENARIO) {
     break;
   case "no-result": // a clean exit with no result event is still a failure
     out(`${init}\n${assistant}\n`);
+    break;
+  case "usage": // the shape the real CLI's result event carries
+    out(
+      `${init}\n${result(false, "done", {
+        total_cost_usd: 0.25,
+        usage: {
+          input_tokens: 100,
+          cache_creation_input_tokens: 20,
+          cache_read_input_tokens: 5,
+          output_tokens: 7,
+        },
+      })}\n`,
+    );
+    break;
+  case "sleep": // long-running: the cancel/kill path has something to kill
+    out(`${init}\n`);
+    sleep(60000);
+    out(`${result(false, "should never get here")}\n`);
     break;
   case "crash":
     out(`${init}\n`);
