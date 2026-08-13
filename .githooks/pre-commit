@@ -1,0 +1,6 @@
+#!/bin/sh
+# Activated by `npm install` (the prepare script sets core.hooksPath=.githooks).
+# Same two gates CI runs first, so a red CI is never a surprise.
+set -e
+npx biome ci .
+npx tsc --noEmit

@@ -1,0 +1,11 @@
+// Tests compile separately so dist/ stays production-only. They import the
+// built dist/ (not src/), so `npm test` builds both, in that order.
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "../dist-test",
+    "declaration": false
+  },
+  "include": ["**/*.ts"]
+}

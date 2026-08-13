@@ -8,3 +8,4 @@ workspace/
 *.cmd
 *.vbs
 dist/
+dist-test/

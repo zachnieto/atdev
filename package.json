@@ -5,10 +5,12 @@
   "description": "Mention-driven Discord agent teammate: @mention it to spawn a headless Claude Code run against your repos, with a built-in Discord MCP server.",
   "main": "index.js",
   "scripts": {
-    "build": "tsc",
-    "prepare": "npm run build",
+    "build": "tsc && tsc -p test",
+    "prepare": "npm run build && git config core.hooksPath .githooks",
     "start": "node index.js",
-    "test": "node test/smoke.js"
+    "test": "npm run build && cd dist-test && node --test",
+    "lint": "biome check .",
+    "format": "biome check --write ."
   },
   "engines": {
     "node": ">=20"
@@ -20,6 +22,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.5.8",
     "@types/node": "^26.2.0",
     "typescript": "^7.0.2"
   }

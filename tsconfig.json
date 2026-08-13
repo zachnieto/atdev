@@ -13,7 +13,8 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
-    "declaration": false,
+    // .d.ts so test/*.test.ts can import the compiled dist/ with real types
+    "declaration": true,
     "sourceMap": true
   },
   "include": ["src/**/*.ts"]
