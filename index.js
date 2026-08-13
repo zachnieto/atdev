@@ -33,7 +33,7 @@ const NEATZ_ID = "145305657237700608";
 // In-process Discord MCP server (Phase 1: tests on 8086 alongside the
 // container's 8085; Phase 1 cutover flips this to 8085 and retires the
 // container). Moves into config.json in Phase 2.
-const MCP_PORT = 8086;
+const MCP_PORT = 8085;
 const MCP_DEFAULT_GUILD_ID = "505102060119916545"; // matches container's DISCORD_GUILD_ID env
 const CLAUDE_EXE = "C:\\Users\\zachn\\.local\\bin\\claude.exe";
 const LOCK_PORT = 47391; // singleton guard: second instance exits immediately
@@ -92,28 +92,6 @@ function saveSession(channelId, sessionId) {
 function resumableSession(channelId) {
   const e = loadSessions()[channelId];
   return e && Date.now() - e.updatedAt < SESSION_TTL_MS ? e.sessionId : null;
-}
-
-// ---- bundled discord-mcp container ------------------------------------------
-// neatz-bot is the single entry point: it ensures the local discord-mcp
-// container (saseq/discord-mcp on 127.0.0.1:8085, --restart unless-stopped)
-// is running. Docker supervises the container after that; we just kick it at
-// startup and retry while Docker Desktop is still coming up after a reboot.
-const MCP_CONTAINER = "neatz-discord-mcp";
-function ensureMcpContainer(attempt = 0) {
-  execFile("docker", ["start", MCP_CONTAINER], { windowsHide: true }, (err) => {
-    if (!err) {
-      log(`discord-mcp container '${MCP_CONTAINER}' running (http://127.0.0.1:8085/mcp)`);
-      return;
-    }
-    if (attempt < 30) {
-      // Docker Desktop can take a while after logon; retry every 20s for ~10min.
-      if (attempt === 0) log(`docker not ready yet; retrying container start (${err.message.split("\n")[0]})`);
-      setTimeout(() => ensureMcpContainer(attempt + 1), 20_000);
-    } else {
-      log(`GAVE UP starting discord-mcp container after ${attempt} attempts — MCP tools will be unavailable until Docker is up.`);
-    }
-  });
 }
 
 // ---- per-repo serialization (two mentions must not race on git state) --------
@@ -554,7 +532,6 @@ if (require.main === module) {
     throw err;
   });
   lock.listen(LOCK_PORT, "127.0.0.1", () => {
-    ensureMcpContainer();
     startBot();
   });
 }
