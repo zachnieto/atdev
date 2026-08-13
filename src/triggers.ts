@@ -1,4 +1,4 @@
-// src/triggers.js — messageCreate -> {tier, mode, run} | null.
+// src/triggers.ts — messageCreate -> {tier, mode, run} | null.
 //
 // A guild message from a human triggers a run when it either @mentions the bot
 // or is a Discord reply to one of the bot's own messages from a live run (the
@@ -11,11 +11,21 @@
 // otherwise starts fresh. A resume always runs at the CURRENT author's tier —
 // a chat user replying into a dev conversation gets chat restrictions.
 
-const { randomUUID } = require("node:crypto");
-const { log } = require("./log");
-const { runByMessage, latestRun } = require("./sessions");
+import { randomUUID } from "node:crypto";
+import { Client, Message } from "discord.js";
+import { AccessRule, Config } from "./config";
+import { log } from "./log";
+import { runByMessage, latestRun } from "./sessions";
 
-function matchAccess(access, message) {
+export interface Match {
+  tier: string;
+  mode: "resume" | "fresh";
+  run: { runId: string; sessionId: string | null };
+}
+
+// `message` is deliberately loose: every field is read through optional chaining
+// because the shapes differ between channel kinds (guild channel vs thread).
+export function matchAccess(access: AccessRule[], message: any): AccessRule | null {
   for (const rule of access) {
     if (rule.user && rule.user !== message.author.id) continue;
     // `channel` also matches a thread's parent (and a channel's category).
@@ -27,13 +37,13 @@ function matchAccess(access, message) {
   return null;
 }
 
-function evaluate(client, config, message) {
+export function evaluate(client: Client, config: Config, message: Message): Match | null {
   if (!message.inGuild() || message.author.bot) return null;
   const guild = config.guilds[message.guildId];
   if (!guild) return null;
 
   const ttlMs = config.sessionTtlHours * 60 * 60 * 1000;
-  const mentioned = message.mentions.users.has(client.user.id); // direct @mention only (not @everyone/@role)
+  const mentioned = message.mentions.users.has(client.user!.id); // direct @mention only (not @everyone/@role)
   const repliedTo = message.reference?.messageId ? runByMessage(message.reference.messageId, ttlMs) : null;
   if (!mentioned && !repliedTo) return null;
 
@@ -47,5 +57,3 @@ function evaluate(client, config, message) {
   const run = repliedTo ?? (mentioned ? latestRun(message.channelId, ttlMs) : null);
   return { tier: rule.tier, mode: run ? "resume" : "fresh", run: run ?? { runId: randomUUID(), sessionId: null } };
 }
-
-module.exports = { evaluate, matchAccess };

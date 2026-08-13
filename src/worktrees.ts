@@ -1,8 +1,8 @@
-// src/worktrees.js — worktree registry (bot side) + `create` helper (agent side).
+// src/worktrees.ts — worktree registry (bot side) + `create` helper (agent side).
 //
 // Dev runs never edit a repo checkout. The agent asks for a worktree:
 //
-//   node src/worktrees.js create <repo-name> [--base <ref>]
+//   node dist/worktrees.js create <repo-name> [--base <ref>]
 //
 // which validates the name against config.repos (an agent cannot point this at
 // an arbitrary path), branches off that repo's base into
@@ -13,18 +13,30 @@
 // can still be inspected; sweep() runs at startup and hourly to collect
 // anything TTL-expired, prune stale git metadata, and delete orphan directories.
 
-const fs = require("node:fs");
-const path = require("node:path");
-const { execFileSync } = require("node:child_process");
-const { ROOT, loadConfig } = require("./config");
-const { log } = require("./log");
+import fs from "node:fs";
+import path from "node:path";
+import { execFileSync } from "node:child_process";
+import { Config, ROOT, loadConfig } from "./config";
+import { log } from "./log";
 
-const STATE_FILE = process.env.ATDEV_WORKTREE_FILE || path.join(ROOT, "state", "worktrees.json");
+export interface WorktreeEntry {
+  repo: string;
+  repoPath: string;
+  path: string;
+  branch: string;
+  runId: string;
+  createdAt: string;
+  status: string;
+}
+
+export type Registry = Record<string, WorktreeEntry>;
+
+export const STATE_FILE = process.env.ATDEV_WORKTREE_FILE || path.join(ROOT, "state", "worktrees.json");
 
 // ponytail: plain read-modify-write, last writer wins. The contention window is
 // milliseconds (one create + one markRunEnded per run) and sweep() collects any
 // entry a lost write leaks. Add a lock only if that stops being true.
-function load() {
+export function load(): Registry {
   try {
     return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
   } catch {
@@ -32,20 +44,20 @@ function load() {
   }
 }
 
-function save(reg) {
+function save(reg: Registry) {
   fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
   fs.writeFileSync(STATE_FILE, JSON.stringify(reg, null, 2));
 }
 
-function git(cwd, ...args) {
+function git(cwd: string, ...args: string[]): string {
   try {
     return String(execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] })).trim();
-  } catch (e) {
+  } catch (e: any) {
     throw new Error(`git ${args.join(" ")} failed in ${cwd}: ${String(e.stderr || e.message).trim()}`);
   }
 }
 
-function exists(repoPath, ref) {
+function exists(repoPath: string, ref: string): boolean {
   try {
     git(repoPath, "rev-parse", "--verify", "--quiet", ref);
     return true;
@@ -56,23 +68,23 @@ function exists(repoPath, ref) {
 
 // Best-effort removal: git first, then the directory itself (Windows holds
 // handles open long enough to need retries), then prune the repo's metadata.
-function remove(entry) {
+export function remove(entry: WorktreeEntry) {
   try {
     git(entry.repoPath, "worktree", "remove", "--force", entry.path);
-  } catch (e) {
+  } catch (e: any) {
     log(`Worktree remove fell back to rm for ${entry.path}: ${e.message}`);
   }
   try {
     fs.rmSync(entry.path, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
     git(entry.repoPath, "worktree", "prune");
-  } catch (e) {
+  } catch (e: any) {
     log(`Worktree cleanup left residue at ${entry.path}: ${e.message}`);
   }
 }
 
 // Success removes the run's worktrees; failure keeps them for inspection.
 // A run with no worktrees (every chat run) is a no-op.
-function markRunEnded(runId, ok) {
+export function markRunEnded(runId: string, ok: boolean) {
   const reg = load();
   let dirty = false;
   for (const [id, entry] of Object.entries(reg)) {
@@ -93,7 +105,7 @@ function markRunEnded(runId, ok) {
 // Startup + hourly: TTL-expired entries go regardless of status, every repo gets
 // pruned, and any directory under workspace/worktrees/ we no longer track is
 // deleted (a crash between `git worktree add` and the registry write leaks one).
-function sweep(config) {
+export function sweep(config: Pick<Config, "workspaceDir" | "worktreeTtlHours" | "repos">) {
   const reg = load();
   const cutoff = Date.now() - config.worktreeTtlHours * 60 * 60 * 1000;
   let dirty = false;
@@ -109,14 +121,14 @@ function sweep(config) {
   for (const [name, repo] of Object.entries(config.repos)) {
     try {
       git(repo.path, "worktree", "prune");
-    } catch (e) {
+    } catch (e: any) {
       log(`Prune failed for ${name}: ${e.message}`);
     }
   }
 
   const root = path.join(config.workspaceDir, "worktrees");
   const known = new Set(Object.values(reg).map((e) => path.resolve(e.path)));
-  let dirs = [];
+  let dirs: fs.Dirent[] = [];
   try {
     dirs = fs.readdirSync(root, { withFileTypes: true });
   } catch {
@@ -128,14 +140,18 @@ function sweep(config) {
     log(`Deleting orphan worktree directory ${full}`);
     try {
       fs.rmSync(full, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
-    } catch (e) {
+    } catch (e: any) {
       log(`Orphan delete failed for ${full}: ${e.message}`);
     }
   }
 }
 
 // Agent-facing. Throws (→ nonzero exit + stderr) on anything unusable.
-function create(repoName, base, config = loadConfig()) {
+export function create(
+  repoName: string,
+  base?: string | null,
+  config: Pick<Config, "workspaceDir" | "repos"> = loadConfig(),
+): string {
   const repo = config.repos[repoName];
   if (!repo) throw new Error(`unknown repo "${repoName}" — available: ${Object.keys(config.repos).join(", ")}`);
   const runId = process.env.ATDEV_RUN_ID;
@@ -170,13 +186,11 @@ function create(repoName, base, config = loadConfig()) {
 if (require.main === module) {
   const [cmd, name, ...rest] = process.argv.slice(2);
   try {
-    if (cmd !== "create" || !name) throw new Error("usage: node src/worktrees.js create <repo-name> [--base <ref>]");
+    if (cmd !== "create" || !name) throw new Error("usage: node dist/worktrees.js create <repo-name> [--base <ref>]");
     const i = rest.indexOf("--base");
     console.log(create(name, i >= 0 ? rest[i + 1] : null)); // last stdout line is the path, by contract
-  } catch (e) {
+  } catch (e: any) {
     console.error(`worktree helper: ${e.message}`);
     process.exit(1);
   }
 }
-
-module.exports = { create, markRunEnded, sweep, load, remove, STATE_FILE };

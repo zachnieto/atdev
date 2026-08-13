@@ -10,19 +10,19 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
-// Must be set before src/sessions.js and src/worktrees.js load — production
+// Must be set before dist/sessions.js and dist/worktrees.js load — production
 // state stays untouched.
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "atdev-test-"));
 process.env.ATDEV_STATE_FILE = path.join(TMP, "sessions.json");
 process.env.ATDEV_WORKTREE_FILE = path.join(TMP, "worktrees.json");
 
 const { execFileSync } = require("node:child_process");
-const { loadConfig, ROOT } = require("../src/config");
-const { matchAccess, evaluate } = require("../src/triggers");
-const sessions = require("../src/sessions");
-const worktrees = require("../src/worktrees");
-const claude = require("../src/runners/claude");
-const { extractReplies, splitForDiscord, fill, gatherContext, projectFor, renderManifest, acquire, release } = require("../src/runs");
+const { loadConfig, ROOT } = require("../dist/config");
+const { matchAccess, evaluate } = require("../dist/triggers");
+const sessions = require("../dist/sessions");
+const worktrees = require("../dist/worktrees");
+const claude = require("../dist/runners/claude");
+const { extractReplies, splitForDiscord, fill, gatherContext, projectFor, renderManifest, acquire, release } = require("../dist/runs");
 
 const HOUR = 60 * 60 * 1000;
 
@@ -507,7 +507,7 @@ function fakeConversation(guildId) {
   {
     const cli = (args, env) => {
       try {
-        execFileSync(process.execPath, [path.join(ROOT, "src", "worktrees.js"), ...args], {
+        execFileSync(process.execPath, [path.join(ROOT, "dist", "worktrees.js"), ...args], {
           encoding: "utf8",
           stdio: ["ignore", "pipe", "pipe"],
           env: { ...process.env, ...env },

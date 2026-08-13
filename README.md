@@ -33,6 +33,11 @@ full path) and you're logged in.
 Then `npm start` (or run `node index.js` directly). The bot logs its Discord login and
 the MCP server's listen address to `logs/bot.log`.
 
+**TypeScript**: the source is TypeScript in `src/`; `tsc` compiles it to CommonJS in
+`dist/` (gitignored), which is what actually runs — `index.js` at the root is a shim
+onto `dist/index.js`. `npm install` builds via the `prepare` script, so a fresh clone
+is ready to `npm start`; after editing `src/`, run `npm run build`.
+
 ## Concepts
 
 **Tiers.** Every message that triggers a run resolves to a tier via `config.access`:
@@ -52,7 +57,7 @@ was a different tier.
 knows about, and `config.guilds.<id>.repos` scopes which of them a given Discord
 server offers. A dev run is handed the manifest (path/base/description/notes per
 repo) and picks which repo(s) the request concerns itself — for anything it's going
-to *edit*, it calls `node src/worktrees.js create <repo-name>` first, which fetches,
+to *edit*, it calls `node dist/worktrees.js create <repo-name>` first, which fetches,
 creates a fresh `git worktree` on a new branch off that repo's configured base, and
 hands back the path. All edits happen inside that worktree; the shared checkout in
 the manifest is read-only. The bot removes the worktree on a successful run and keeps
@@ -60,7 +65,7 @@ it (marked failed) for inspection otherwise; a sweep at startup and hourly reaps
 anything past `worktreeTtlHours` or orphaned by a crash.
 
 **Built-in Discord MCP server.** The bot serves a small Streamable HTTP MCP server
-(`src/mcp-server.js`) over its own already-logged-in discord.js client — no separate
+(`src/mcp-server.ts`) over its own already-logged-in discord.js client — no separate
 process or container. It exposes 9 read tools plus `send_message`, under the server
 key `discord-mcp` (compatibility contract: tool names/args must not change, since
 other repos' Claude configs already call them). To point an external Claude Code
@@ -112,7 +117,7 @@ session at it, add to that repo's `.mcp.json`:
 ## Prompt customization
 
 The prompt templates live in `prompts/` and are filled with placeholders like
-`{CONTENT}`, `{CONTEXT}`, `{REPOS_MANIFEST}`, `{WORKFLOW_NOTES}` (see `src/runs.js`'s
+`{CONTENT}`, `{CONTEXT}`, `{REPOS_MANIFEST}`, `{WORKFLOW_NOTES}` (see `src/runs.ts`'s
 `fill()` for the full list):
 
 - `prompts/work-order.md` — fresh `dev`-tier run: routing, worktree/PR rules, reply contract.
@@ -125,7 +130,7 @@ it's the one thing dev runs get that chat runs don't.
 
 ## Security model
 
-- **Access rules run before any AI does.** `src/triggers.js` checks `config.access`
+- **Access rules run before any AI does.** `src/triggers.ts` checks `config.access`
   against the message *before* a harness process is ever spawned; an unmatched user
   gets a log line and nothing else.
 - **Tier restriction is enforced by the harness's own flags** (`--permission-mode`,
@@ -140,7 +145,7 @@ it's the one thing dev runs get that chat runs don't.
 
 Developed and run Windows-first: the timeout kill path uses `taskkill /T /F`, and
 worktree removal retries on `EBUSY` (Windows can hold file handles open briefly after
-a process exits). A POSIX kill path (`SIGKILL`) exists in `src/runners/claude.js` for
+a process exits). A POSIX kill path (`SIGKILL`) exists in `src/runners/claude.ts` for
 other platforms but is less exercised. For autostart on Windows, use a `.cmd` that
 `cd`s into the repo and runs `node index.js` (appending stdout to a log), wrapped in
 a `.vbs` one-liner that launches it hidden (no console flash) — point Task Scheduler
@@ -149,14 +154,14 @@ that launcher harmless.
 
 ## Adding a second harness
 
-Harnesses are an adapter seam, not a plugin system. `src/runners/claude.js` is the
+Harnesses are an adapter seam, not a plugin system. `src/runners/claude.ts` is the
 whole contract: a `run({harness, cwd, prompt, resumeId, tier, env, addDirs, onEvent})`
 function returning `{code, text, sessionId, err}`, where `onEvent` receives normalized
 events (`{type: "init", sessionId}`, `{type: "tool", name, input}`,
 `{type: "text", text}`, `{type: "result", isError, text}`) as the run progresses.
 Everything specific to Claude Code's `stream-json` output format stays inside that one
 file. `config.harness.type` already distinguishes harnesses in the config schema, but
-`src/runs.js` currently imports `./runners/claude` directly rather than dispatching on
-it. To add a second harness: write `src/runners/<name>.js` implementing the same
-contract, then switch that import in `src/runs.js` to pick the module based on
+`src/runs.ts` currently imports `./runners/claude` directly rather than dispatching on
+it. To add a second harness: write `src/runners/<name>.ts` implementing the same
+contract, then switch that import in `src/runs.ts` to pick the module based on
 `config.harness.type`.

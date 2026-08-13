@@ -7,3 +7,4 @@ workspace/
 # machine-local launcher scripts (Task Scheduler autostart)
 *.cmd
 *.vbs
+dist/

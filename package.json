@@ -5,7 +5,10 @@
   "description": "Mention-driven Discord agent teammate: @mention it to spawn a headless Claude Code run against your repos, with a built-in Discord MCP server.",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "build": "tsc",
+    "prepare": "npm run build",
+    "start": "node index.js",
+    "test": "node test/smoke.js"
   },
   "engines": {
     "node": ">=20"
@@ -15,5 +18,9 @@
     "discord.js": "^14.16.3",
     "dotenv": "^16.4.5",
     "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "typescript": "^7.0.2"
   }
 }

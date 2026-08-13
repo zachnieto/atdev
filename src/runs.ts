@@ -1,4 +1,4 @@
-// src/runs.js — one run end to end: queue, context, prompt, harness, replies.
+// src/runs.ts — one run end to end: queue, context, prompt, harness, replies.
 //
 // Context features:
 //  - Reply-chain: if the mention is a Discord reply, the referenced chain is
@@ -15,23 +15,36 @@
 //    posted as its own message. Nothing is hard-truncated — oversized blocks
 //    are split at line boundaries as a last resort.
 //  - Worktrees: a dev run starts in the workspace, not in a repo, and creates
-//    its own worktree per repo it edits (see worktrees.js). Runs are therefore
+//    its own worktree per repo it edits (see worktrees.ts). Runs are therefore
 //    serialized only against their own follow-ups; how many run at once is
 //    capped globally by config.maxConcurrentRuns.
 
-const fs = require("node:fs");
-const path = require("node:path");
-const { DEFAULTS, ROOT } = require("./config");
-const { log } = require("./log");
-const { recordRun, recordSession, recordMessage } = require("./sessions");
-const { markRunEnded } = require("./worktrees");
-const claude = require("./runners/claude");
+import fs from "node:fs";
+import path from "node:path";
+import { Message } from "discord.js";
+import { Config, DEFAULTS, ROOT, RepoConfig } from "./config";
+import { log } from "./log";
+import { recordRun, recordSession, recordMessage } from "./sessions";
+import { markRunEnded } from "./worktrees";
+import { Match } from "./triggers";
+import { RunnerEvent, RunResult } from "./runners/claude";
+import * as claude from "./runners/claude";
+
+export interface Project {
+  name: string;
+  repo: string;
+  prNote: string;
+  base: string;
+  manifest: string;
+  addDirs: string[];
+  workflowNotes: string;
+}
 
 // ---- serialization -----------------------------------------------------------
 // Per-run queue: a run's follow-ups never overlap each other. Different runs are
 // independent now that each works in its own worktree.
-const queues = new Map();
-function enqueue(key, job) {
+const queues = new Map<string, Promise<unknown>>();
+export function enqueue<T>(key: string, job: () => Promise<T>): Promise<T> {
   const prev = queues.get(key) || Promise.resolve();
   const next = prev.then(job, job); // run regardless of prior job's outcome
   queues.set(
@@ -45,27 +58,27 @@ function enqueue(key, job) {
 // At most maxConcurrentRuns harness processes at a time; the rest wait FIFO. A
 // released slot is handed straight to the next waiter (never decremented and
 // re-taken), so the cap holds even when a new run arrives at that moment.
-const slots = { active: 0, waiting: [] };
-async function acquire(max) {
+const slots: { active: number; waiting: (() => void)[] } = { active: 0, waiting: [] };
+export async function acquire(max: number) {
   if (slots.active < max) slots.active++;
-  else await new Promise((r) => slots.waiting.push(r)); // release() hands its slot over
+  else await new Promise<void>((r) => slots.waiting.push(r)); // release() hands its slot over
 }
-function release() {
+export function release() {
   const next = slots.waiting.shift();
   if (next) next();
   else slots.active--;
 }
 
 // ---- context gathering -------------------------------------------------------
-function fmtMsg(config, m) {
+function fmtMsg(config: Config, m: Message) {
   const named = config.access.find((r) => r.user === m.author.id && r.name);
   const who = `${m.author.username}${named ? ` (${named.name})` : ""}${m.author.bot ? " [bot]" : ""}`;
   const body = (m.content || "[embed/attachment]").replace(/\s+/g, " ").slice(0, 300);
   return `${who}: ${body}`;
 }
 
-async function fetchReplyChain(message, max) {
-  const chain = [];
+async function fetchReplyChain(message: Message, max: number): Promise<Message[]> {
+  const chain: Message[] = [];
   let cur = message;
   while (cur.reference?.messageId && chain.length < max) {
     try {
@@ -78,7 +91,7 @@ async function fetchReplyChain(message, max) {
   return chain.reverse(); // oldest first
 }
 
-async function fetchBackscroll(message, count) {
+async function fetchBackscroll(message: Message, count: number): Promise<Message[]> {
   try {
     const msgs = await message.channel.messages.fetch({ limit: count, before: message.id });
     return [...msgs.values()].reverse(); // oldest first
@@ -87,7 +100,7 @@ async function fetchBackscroll(message, count) {
   }
 }
 
-async function gatherContext(config, message, { backscroll }) {
+export async function gatherContext(config: Config, message: Message, { backscroll }: { backscroll: boolean }) {
   const parts = [];
   const chain = await fetchReplyChain(message, config.replyChainMax);
   if (chain.length) {
@@ -113,19 +126,18 @@ const TEMPLATE_DEV = fs.readFileSync(path.join(ROOT, "prompts", "work-order.md")
 const TEMPLATE_CHAT = fs.readFileSync(path.join(ROOT, "prompts", "chat.md"), "utf8");
 const TEMPLATE_FOLLOWUP = fs.readFileSync(path.join(ROOT, "prompts", "follow-up.md"), "utf8");
 
-function permalink(message) {
+function permalink(message: Message) {
   return `https://discord.com/channels/${message.guildId}/${message.channelId}/${message.id}`;
 }
 
 // The repos a guild offers, in config order; the first one is the run's cwd.
-function reposFor(config, message) {
-  const names = config.guilds[message.guildId]?.repos?.length
-    ? config.guilds[message.guildId].repos
-    : Object.keys(config.repos);
+function reposFor(config: Config, message: Message): (RepoConfig & { name: string })[] {
+  const guildId = message.guildId!;
+  const names = config.guilds[guildId]?.repos?.length ? config.guilds[guildId].repos! : Object.keys(config.repos);
   return names.map((name) => ({ name, ...config.repos[name] }));
 }
 
-function renderManifest(repos) {
+export function renderManifest(repos: (RepoConfig & { name: string })[]) {
   return repos
     .map((r) =>
       [`### ${r.name}`, `- path: ${r.path}`, `- base: ${r.base}`, `- description: ${r.description ?? ""}`, `- notes: ${r.notes ?? ""}`].join(
@@ -135,11 +147,11 @@ function renderManifest(repos) {
     .join("\n\n");
 }
 
-function projectFor(config, message) {
+export function projectFor(config: Config, message: Message): Project {
   const repos = reposFor(config, message);
   const [first] = repos;
   return {
-    name: config.guilds[message.guildId]?.name,
+    name: config.guilds[message.guildId!]?.name,
     repo: first.path,
     prNote: first.notes ?? "",
     base: first.base,
@@ -149,7 +161,7 @@ function projectFor(config, message) {
   };
 }
 
-function fill(template, project, message, context) {
+export function fill(template: string, project: Project, message: Message, context: string) {
   const notes = project.workflowNotes ?? "";
   // An operator with no workflow notes shouldn't get a dangling heading.
   return (notes ? template : template.replace(/#+ Workflow notes[^\n]*\n+(?=\{WORKFLOW_NOTES\})/, ""))
@@ -159,7 +171,8 @@ function fill(template, project, message, context) {
     .replaceAll("{BASE}", project.base)
     .replaceAll("{REPOS_MANIFEST}", project.manifest ?? "")
     .replaceAll("{WORKFLOW_NOTES}", notes)
-    .replaceAll("{CHANNEL}", message.channel?.name ?? message.channelId)
+    // `name` only exists on guild channels; DMs fall back to the id.
+    .replaceAll("{CHANNEL}", (message.channel as any)?.name ?? message.channelId)
     .replaceAll("{PERMALINK}", permalink(message))
     .replaceAll("{CONTEXT}", context)
     .replaceAll("{CONTENT}", message.content);
@@ -168,7 +181,7 @@ function fill(template, project, message, context) {
 // ---- reply extraction --------------------------------------------------------
 // The agent owns message sizing via one or more <reply> blocks. We never hard-
 // truncate: an oversized block is split at line boundaries as a last resort.
-function splitForDiscord(text, limit = DEFAULTS.replyLimit) {
+export function splitForDiscord(text: string, limit = DEFAULTS.replyLimit): string[] {
   const out = [];
   let cur = "";
   for (const line of text.split("\n")) {
@@ -192,7 +205,7 @@ function splitForDiscord(text, limit = DEFAULTS.replyLimit) {
   return out;
 }
 
-function extractReplies(text, limit = DEFAULTS.replyLimit, maxMessages = DEFAULTS.maxReplyMessages) {
+export function extractReplies(text: string, limit = DEFAULTS.replyLimit, maxMessages = DEFAULTS.maxReplyMessages): string[] {
   const blocks = [...text.matchAll(/<reply>\s*([\s\S]*?)\s*<\/reply>/g)].map((m) => m[1]);
   const source = blocks.length ? blocks : [text.trim()];
   const chunks = source.flatMap((b) => splitForDiscord(b, limit)).filter((c) => c.trim());
@@ -208,8 +221,8 @@ function extractReplies(text, limit = DEFAULTS.replyLimit, maxMessages = DEFAULT
 // Post reply chunks as a chain: first replies to the mention (with ping), each
 // subsequent chunk replies to the previous one (no ping). Returns the posted
 // messages so the caller can register them as follow-up handles.
-async function postReplies(message, chunks) {
-  const posted = [];
+export async function postReplies(message: Message, chunks: string[]): Promise<Message[]> {
+  const posted: Message[] = [];
   let target = message;
   for (const chunk of chunks) {
     target = await target.reply({ content: chunk, allowedMentions: { repliedUser: posted.length === 0 } });
@@ -219,12 +232,12 @@ async function postReplies(message, chunks) {
 }
 
 // ---- the run ----------------------------------------------------------------
-async function startRun(config, message, { tier, mode, run }) {
+export async function startRun(config: Config, message: Message, { tier, mode, run }: Match) {
   const { runId } = run;
   const project = projectFor(config, message);
   const ttlMs = config.sessionTtlHours * 60 * 60 * 1000;
   log(
-    `${tier}/${mode} run ${runId} from ${message.author.username} in ${project.name}#${message.channel?.name}: ${message.content.slice(0, 200)}`,
+    `${tier}/${mode} run ${runId} from ${message.author.username} in ${project.name}#${(message.channel as any)?.name}: ${message.content.slice(0, 200)}`,
   );
   await message.react("👀").catch(() => {});
 
@@ -232,15 +245,16 @@ async function startRun(config, message, { tier, mode, run }) {
   // the shared checkouts, so nothing else contends.
   return enqueue(runId, async () => {
     const started = Date.now();
-    recordRun(runId, { channelId: message.channelId, guildId: message.guildId, tier }, ttlMs);
-    const track = (m) => m && recordMessage(runId, m.id, ttlMs);
+    recordRun(runId, { channelId: message.channelId, guildId: message.guildId!, tier }, ttlMs);
+    const track = (m: Message | null | undefined) => m && recordMessage(runId, m.id, ttlMs);
 
     const max = config.maxConcurrentRuns ?? 3;
     // Discord's typing indicator lasts ~10s per ping; refresh while the run
     // (or its queue wait) is live. It clears itself when the reply posts.
-    message.channel.sendTyping().catch(() => {});
-    const typing = setInterval(() => message.channel.sendTyping().catch(() => {}), 8000);
-    const onEvent = (ev) => {
+    const channel = message.channel as any; // sendTyping() is not on every channel kind in the union
+    channel.sendTyping().catch(() => {});
+    const typing = setInterval(() => channel.sendTyping().catch(() => {}), 8000);
+    const onEvent = (ev: RunnerEvent) => {
       // Save at run start so a crashed run is still resumable.
       if (ev.type === "init") recordSession(runId, ev.sessionId, ttlMs);
     };
@@ -249,7 +263,7 @@ async function startRun(config, message, { tier, mode, run }) {
     // the worktrees it creates under the workspace. Chat stays as it was.
     const dev = tier === "dev";
     if (dev) fs.mkdirSync(config.workspaceDir, { recursive: true });
-    const spawn = (prompt, resume) =>
+    const spawn = (prompt: string, resume: string | null) =>
       claude.run({
         harness: config.harness,
         cwd: dev ? config.workspaceDir : project.repo,
@@ -265,7 +279,7 @@ async function startRun(config, message, { tier, mode, run }) {
     // ok drives worktree disposal: kept for inspection unless the run succeeded.
     let ok = false;
     try {
-      let res;
+      let res: RunResult | null = null;
       if (mode === "resume" && run.sessionId) {
         // Follow-up: resume this run's session; lean prompt, reply-chain only
         // (the session already has the earlier context).
@@ -309,17 +323,3 @@ async function startRun(config, message, { tier, mode, run }) {
     }
   });
 }
-
-module.exports = {
-  startRun,
-  enqueue,
-  acquire,
-  release,
-  gatherContext,
-  fill,
-  projectFor,
-  renderManifest,
-  extractReplies,
-  splitForDiscord,
-  postReplies,
-};

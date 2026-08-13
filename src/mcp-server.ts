@@ -1,4 +1,4 @@
-// src/mcp-server.js — in-process Discord MCP server (Streamable HTTP, stateless).
+// src/mcp-server.ts — in-process Discord MCP server (Streamable HTTP, stateless).
 //
 // Serves the same 10 read/write Discord tools the saseq/discord-mcp Java
 // container exposes today, over the bot's own already-logged-in discord.js
@@ -11,33 +11,39 @@
 // the SDK's simpleStatelessStreamableHttp example) on a bare node:http
 // server — no Express, no `sessionIdGenerator`.
 
-const http = require("node:http");
-const { z } = require("zod");
-const { McpServer } = require("@modelcontextprotocol/sdk/server/mcp.js");
-const { StreamableHTTPServerTransport } = require("@modelcontextprotocol/sdk/server/streamableHttp.js");
-const { ChannelType } = require("discord.js");
+import http from "node:http";
+import { z } from "zod";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { ChannelType, Client } from "discord.js";
+import { McpConfig } from "./config";
 
-function typeName(t) {
+function typeName(t: number) {
   return ChannelType[t] ?? String(t);
 }
 
-function text(s) {
-  return { content: [{ type: "text", text: s }] };
+function text(s: string) {
+  return { content: [{ type: "text" as const, text: s }] };
 }
-function errText(e) {
-  return { content: [{ type: "text", text: `Error: ${e?.message || e}` }], isError: true };
+function errText(e: any) {
+  return { content: [{ type: "text" as const, text: `Error: ${e?.message || e}` }], isError: true };
 }
 
-function fmtAttachments(msg) {
-  return msg.attachments.size ? ` [attachments: ${[...msg.attachments.values()].map((a) => a.name).join(", ")}]` : "";
+function fmtAttachments(msg: any) {
+  return msg.attachments.size ? ` [attachments: ${[...msg.attachments.values()].map((a: any) => a.name).join(", ")}]` : "";
 }
-function fmtMessage(m) {
+function fmtMessage(m: any) {
   return `[${m.createdAt.toISOString()}] ${m.author.username} (${m.author.id}) msg:${m.id}: ${m.content || "[no text]"}${fmtAttachments(m)}`;
 }
 
 // ---- tool implementations (thin discord.js calls) -----------------------------
-function registerTools(server, client, defaultGuildId) {
-  function resolveGuild(guildId) {
+function registerTools(server: McpServer, client: Client, defaultGuildId?: string) {
+  // discord.js's Channel union has no common shape for the duck-typed members
+  // these tools read (threads, topic, permissionOverwrites, name, send). Fetch
+  // as `any` and keep the runtime guards the JS already had.
+  const fetchChannel = (id: string): Promise<any> => client.channels.fetch(id) as Promise<any>;
+
+  function resolveGuild(guildId?: string) {
     const id = guildId || defaultGuildId;
     if (!id) throw new Error("guildId is required: bot is in multiple guilds and no default is configured");
     const guild = client.guilds.cache.get(id);
@@ -59,9 +65,9 @@ function registerTools(server, client, defaultGuildId) {
     },
     async ({ channelId, count, before, after, around }) => {
       try {
-        const channel = await client.channels.fetch(channelId);
+        const channel = await fetchChannel(channelId);
         if (!channel?.isTextBased()) throw new Error(`Channel ${channelId} is not a text channel`);
-        const opts = {};
+        const opts: { limit?: number; before?: string; after?: string; around?: string } = {};
         if (count) opts.limit = Math.max(1, Math.min(100, parseInt(count, 10) || 50));
         if (before) opts.before = before;
         if (after) opts.after = after;
@@ -83,11 +89,11 @@ function registerTools(server, client, defaultGuildId) {
     },
     async ({ channelId }) => {
       try {
-        const channel = await client.channels.fetch(channelId);
+        const channel = await fetchChannel(channelId);
         if (!channel?.threads) throw new Error(`Channel ${channelId} is not a forum channel`);
         const active = await channel.threads.fetchActive();
         const archived = await channel.threads.fetchArchived().catch(() => ({ threads: new Map() }));
-        const all = new Map([...active.threads, ...archived.threads]);
+        const all = new Map<string, any>([...active.threads, ...archived.threads]);
         if (!all.size) return text("(no forum posts)");
         const lines = [...all.values()].map(
           (t) =>
@@ -108,9 +114,9 @@ function registerTools(server, client, defaultGuildId) {
     },
     async ({ channelId, messageId, attachmentId }) => {
       try {
-        const channel = await client.channels.fetch(channelId);
+        const channel = await fetchChannel(channelId);
         const message = await channel.messages.fetch(messageId);
-        let atts = [...message.attachments.values()];
+        let atts: any[] = [...message.attachments.values()];
         if (attachmentId) atts = atts.filter((a) => a.id === attachmentId);
         if (!atts.length) return text("(no attachments)");
         return text(
@@ -132,7 +138,7 @@ function registerTools(server, client, defaultGuildId) {
     },
     async ({ channelId, message }) => {
       try {
-        const channel = await client.channels.fetch(channelId);
+        const channel = await fetchChannel(channelId);
         if (!channel?.isTextBased()) throw new Error(`Channel ${channelId} is not a text channel`);
         const sent = await channel.send(message);
         return text(`Sent message ${sent.id} to #${channel.name ?? channelId}`);
@@ -168,7 +174,7 @@ function registerTools(server, client, defaultGuildId) {
     },
     async ({ channelId }) => {
       try {
-        const c = await client.channels.fetch(channelId);
+        const c = await fetchChannel(channelId);
         if (!c) throw new Error(`Channel ${channelId} not found`);
         const lines = [
           `name: ${c.name ?? "(dm)"}`,
@@ -258,9 +264,9 @@ function registerTools(server, client, defaultGuildId) {
     },
     async ({ channelId }) => {
       try {
-        const channel = await client.channels.fetch(channelId);
+        const channel = await fetchChannel(channelId);
         if (!channel?.permissionOverwrites) throw new Error(`Channel ${channelId} has no permission overwrites`);
-        const overwrites = [...channel.permissionOverwrites.cache.values()];
+        const overwrites: any[] = [...channel.permissionOverwrites.cache.values()];
         if (!overwrites.length) return text("(no permission overwrites)");
         const lines = overwrites.map(
           (o) =>
@@ -277,7 +283,10 @@ function registerTools(server, client, defaultGuildId) {
 // ---- HTTP wiring (stateless Streamable HTTP, no Express) ----------------------
 // One McpServer + transport per request — stateless transports cannot be
 // reused across requests (the SDK throws if you try).
-function startMcpServer(client, { host = "127.0.0.1", port = 8086, path: mcpPath = "/mcp", defaultGuildId } = {}) {
+export function startMcpServer(
+  client: Client,
+  { host = "127.0.0.1", port = 8086, path: mcpPath = "/mcp", defaultGuildId }: McpConfig = {},
+) {
   const httpServer = http.createServer(async (req, res) => {
     if (req.url !== mcpPath) {
       res.writeHead(404).end();
@@ -303,5 +312,3 @@ function startMcpServer(client, { host = "127.0.0.1", port = 8086, path: mcpPath
   httpServer.listen(port, host);
   return httpServer;
 }
-
-module.exports = { startMcpServer };
