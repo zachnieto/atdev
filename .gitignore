@@ -3,3 +3,5 @@ node_modules/
 mcp.env
 logs/
 state/
+config.json
+workspace/

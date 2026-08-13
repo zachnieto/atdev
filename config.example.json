@@ -18,7 +18,8 @@
   "mcp": {
     "port": 8085,
     "host": "127.0.0.1",
-    "path": "/mcp"
+    "path": "/mcp",
+    "defaultGuildId": "111111111111111111"
   },
   "repos": {
     "example-app": {
@@ -41,7 +42,7 @@
     }
   },
   "access": [
-    { "user": "222222222222222222", "tier": "dev" },
+    { "user": "222222222222222222", "name": "Ada", "tier": "dev" },
     { "guild": "111111111111111111", "role": "333333333333333333", "tier": "dev" },
     { "channel": "444444444444444444", "everyone": true, "tier": "chat" }
   ],
@@ -50,6 +51,10 @@
   "worktreeTtlHours": 24,
   "backscrollCount": 10,
   "replyChainMax": 5,
+  "replyLimit": 1900,
+  "maxReplyMessages": 8,
+  "statusEditMinMs": 4500,
+  "statusTail": 10,
   "maxConcurrentRuns": 3,
   "lockPort": 47391
 }
