@@ -53,6 +53,20 @@ channel's most recent run if it's still within `sessionTtlHours`; otherwise it s
 fresh. A follow-up always runs at the *replying* user's tier, even if the original run
 was a different tier.
 
+**Control commands.** Two @mentions are commands rather than work orders — they
+never spawn a harness, mint a run, or wait in the queue:
+
+- `@bot status` — any authorized tier. Lists the runs in flight (short run id,
+  tier, guild#channel, elapsed) plus how many are queued behind
+  `maxConcurrentRuns`, or `idle`.
+- `@bot cancel` — `dev` tier only. Kills the run's process tree: as a Discord
+  reply to one of a run's messages it cancels *that* run, bare it cancels the
+  channel's most recent running one. Reacts 🛑 and reports how long it ran. A
+  cancelled run counts as failed, so its worktree is kept for inspection.
+
+A run that is waiting for a concurrency slot reacts ⏳ on the triggering message
+and drops it again when it actually starts.
+
 **Repos manifest + self-routing worktrees.** `config.repos` lists every repo the bot
 knows about, and `config.guilds.<id>.repos` scopes which of them a given Discord
 server offers. A dev run is handed the manifest (path/base/description/notes per
@@ -110,6 +124,9 @@ session at it, add to that repo's `.mcp.json`:
 - `replyLimit` — max characters per posted Discord message (Discord's hard cap is 2000).
 - `maxReplyMessages` — cap on how many `<reply>` blocks/chunks get posted per run.
 - `maxConcurrentRuns` — global cap on harness processes running at once; excess runs queue FIFO.
+- `usageFooter` — append a small-text `tokens · cost · duration` line to the reply (default `true`;
+  skipped when the harness reports no usage). Every run's usage is appended to `state/usage.jsonl`
+  either way.
 - `lockPort` — localhost TCP port used as a singleton lock (a second launch exits immediately).
 
 `.env` (gitignored): `DISCORD_TOKEN` is the only secret.
@@ -142,7 +159,7 @@ Tests are TypeScript in `test/`, compiled by their own `test/tsconfig.json` into
 runner — no framework, no mocks beyond structural fakes. They import the *built*
 `dist/`, so `npm test` builds first. The suite is self-contained: it builds its own
 config fixture in a temp directory and redirects `ATDEV_STATE_FILE`,
-`ATDEV_WORKTREE_FILE` and `ATDEV_LOG_FILE` there, so it never reads or writes your
+`ATDEV_WORKTREE_FILE`, `ATDEV_LOG_FILE` and `ATDEV_USAGE_FILE` there, so it never reads or writes your
 `config.json`, `.env`, `state/` or `logs/` — a fresh clone with none of them passes.
 
 A committed `.githooks/pre-commit` runs `biome ci .` and `tsc --noEmit` and fails the
@@ -177,10 +194,15 @@ that launcher harmless.
 ## Adding a second harness
 
 Harnesses are an adapter seam, not a plugin system. `src/runners/claude.ts` is the
-whole contract: a `run({harness, cwd, prompt, resumeId, tier, env, addDirs, onEvent})`
-function returning `{code, text, sessionId, err}`, where `onEvent` receives normalized
-events (`{type: "init", sessionId}`, `{type: "tool", name, input}`,
-`{type: "text", text}`, `{type: "result", isError, text}`) as the run progresses.
+whole contract: a `run({harness, cwd, prompt, resumeId, tier, env, addDirs, onEvent, onSpawn})`
+function returning `{code, text, sessionId, err, usage?, costUsd?}`, where `onEvent`
+receives normalized events (`{type: "init", sessionId}`, `{type: "tool", name, input}`,
+`{type: "text", text}`, `{type: "result", isError, text, usage?, costUsd?}`) as the run
+progresses, and `onSpawn` is handed a `kill()` for the run's whole process tree as soon
+as it starts (the timeout and `@bot cancel` both go through it). `usage` is
+`{input, output}` token totals — input folds in the cache tiers — and is omitted by a
+harness that reports none. A harness that fails to spawn at all resolves as a failed run
+(`code: null`), it never throws into the bot.
 Everything specific to Claude Code's `stream-json` output format stays inside that one
 file. `config.harness.type` already distinguishes harnesses in the config schema, but
 `src/runs.ts` currently imports `./runners/claude` directly rather than dispatching on

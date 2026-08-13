@@ -72,5 +72,6 @@
   "replyLimit": 1900,
   "maxReplyMessages": 8,
   "maxConcurrentRuns": 3,
+  "usageFooter": true,
   "lockPort": 47391
 }

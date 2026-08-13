@@ -26,7 +26,7 @@ import { type Config, DEFAULTS, ROOT, type RepoConfig } from "./config";
 import { log } from "./log";
 import { recordRun, recordSession, recordMessage } from "./sessions";
 import { markRunEnded } from "./worktrees";
-import type { Match } from "./triggers";
+import type { RunMatch } from "./triggers";
 import type { RunnerEvent, RunResult } from "./runners/claude";
 import * as claude from "./runners/claude";
 
@@ -59,6 +59,7 @@ export function enqueue<T>(key: string, job: () => Promise<T>): Promise<T> {
 // released slot is handed straight to the next waiter (never decremented and
 // re-taken), so the cap holds even when a new run arrives at that moment.
 const slots: { active: number; waiting: (() => void)[] } = { active: 0, waiting: [] };
+export const busy = (max: number) => slots.active >= max; // "this run will have to wait"
 export async function acquire(max: number) {
   if (slots.active < max) slots.active++;
   else await new Promise<void>((r) => slots.waiting.push(r)); // release() hands its slot over
@@ -67,6 +68,49 @@ export function release() {
   const next = slots.waiting.shift();
   if (next) next();
   else slots.active--;
+}
+
+// ---- active runs -------------------------------------------------------------
+// In-memory only: a restart loses it, and a run the bot no longer supervises
+// can't be cancelled anyway. `cancel`/`status` read it (see commands.ts).
+export interface ActiveRun {
+  runId: string;
+  tier: string;
+  where: string; // "Guild#channel", for status
+  channelId: string;
+  startedAt: number;
+  queued: boolean; // waiting on the concurrency semaphore
+  cancelled: boolean;
+  kill?: () => void; // set once the harness process exists
+}
+export const activeRuns = new Map<string, ActiveRun>();
+
+// ---- usage -------------------------------------------------------------------
+export const USAGE_FILE = process.env.ATDEV_USAGE_FILE || path.join(ROOT, "state", "usage.jsonl");
+
+export function recordUsage(row: Record<string, unknown>) {
+  try {
+    fs.mkdirSync(path.dirname(USAGE_FILE), { recursive: true });
+    fs.appendFileSync(USAGE_FILE, `${JSON.stringify(row)}\n`);
+  } catch (e: any) {
+    log(`Usage append failed: ${e?.message || e}`);
+  }
+}
+
+// Discord small text; null when the harness reported no usage (non-Claude).
+export function usageLine(res: RunResult, mins: string): string | null {
+  if (!res.usage) return null;
+  const tokens = res.usage.input + res.usage.output;
+  const cost = res.costUsd != null ? ` · $${res.costUsd.toFixed(2)}` : "";
+  return `-# ${tokens.toLocaleString("en-US")} tokens${cost} · ${mins}min`;
+}
+
+// Ride along on the last chunk if it fits, otherwise take a message of its own.
+export function withFooter(chunks: string[], footer: string | null, limit = DEFAULTS.replyLimit): string[] {
+  if (!footer) return chunks;
+  const last = chunks.at(-1);
+  if (last && last.length + footer.length + 1 <= limit) return [...chunks.slice(0, -1), `${last}\n${footer}`];
+  return [...chunks, footer];
 }
 
 // ---- context gathering -------------------------------------------------------
@@ -238,7 +282,7 @@ export async function postReplies(message: Message, chunks: string[]): Promise<M
 }
 
 // ---- the run ----------------------------------------------------------------
-export async function startRun(config: Config, message: Message, { tier, mode, run }: Match) {
+export async function startRun(config: Config, message: Message, { tier, mode, run }: RunMatch) {
   const { runId } = run;
   const project = projectFor(config, message);
   const ttlMs = config.sessionTtlHours * 60 * 60 * 1000;
@@ -252,6 +296,16 @@ export async function startRun(config: Config, message: Message, { tier, mode, r
   return enqueue(runId, async () => {
     const started = Date.now();
     recordRun(runId, { channelId: message.channelId, guildId: message.guildId!, tier }, ttlMs);
+    const entry: ActiveRun = {
+      runId,
+      tier,
+      where: `${project.name}#${(message.channel as any)?.name ?? message.channelId}`,
+      channelId: message.channelId,
+      startedAt: started,
+      queued: true,
+      cancelled: false,
+    };
+    activeRuns.set(runId, entry);
     const track = (m: Message | null | undefined) => m && recordMessage(runId, m.id, ttlMs);
 
     const max = config.maxConcurrentRuns ?? 3;
@@ -279,9 +333,17 @@ export async function startRun(config: Config, message: Message, { tier, mode, r
         env: dev ? { ATDEV_RUN_ID: runId, ATDEV_WORKTREE_HELPER: path.join(__dirname, "worktrees.js") } : undefined,
         addDirs: dev ? [project.repo, ...project.addDirs] : project.addDirs,
         onEvent,
+        onSpawn: (kill) => {
+          entry.kill = kill;
+          if (entry.cancelled) kill(); // cancelled while the retry was respawning
+        },
       });
 
+    // Queued behind the concurrency cap: say so, and take the ⏳ back on start.
+    const waitMark = busy(max) ? await message.react("⏳").catch(() => null) : null;
     await acquire(max);
+    entry.queued = false;
+    await waitMark?.users.remove().catch(() => {});
     // ok drives worktree disposal: kept for inspection unless the run succeeded.
     let ok = false;
     try {
@@ -306,11 +368,31 @@ export async function startRun(config: Config, message: Message, { tier, mode, r
       log(`Run ${runId} finished in ${mins}min (exit ${res.code}, session ${res.sessionId ?? "?"}) for message ${message.id}`);
       ok = res.code === 0 && !!res.text;
 
+      if (res.usage) {
+        log(`Run ${runId} usage: ${res.usage.input} in / ${res.usage.output} out, $${(res.costUsd ?? 0).toFixed(4)}`);
+        recordUsage({
+          ts: new Date().toISOString(),
+          runId,
+          guildId: message.guildId,
+          channelId: message.channelId,
+          tier,
+          mode,
+          tokensIn: res.usage.input,
+          tokensOut: res.usage.output,
+          costUsd: res.costUsd ?? null,
+          minutes: Number(mins),
+          ok,
+        });
+      }
+
       if (ok) {
         if (res.sessionId) recordSession(runId, res.sessionId, ttlMs);
         await message.react("✅").catch(() => {});
-        for (const m of await postReplies(message, extractReplies(res.text, config.replyLimit, config.maxReplyMessages)))
-          track(m);
+        const chunks = extractReplies(res.text, config.replyLimit, config.maxReplyMessages);
+        const footer = config.usageFooter === false ? null : usageLine(res, mins);
+        for (const m of await postReplies(message, withFooter(chunks, footer, config.replyLimit))) track(m);
+      } else if (entry.cancelled) {
+        log(`Run ${runId} was cancelled (exit ${res.code}); no failure reply posted`);
       } else {
         log(`Run error output: ${(res.err || res.text).slice(0, 500)}`);
         await message.react("❌").catch(() => {});
@@ -326,6 +408,7 @@ export async function startRun(config: Config, message: Message, { tier, mode, r
     } finally {
       clearInterval(typing);
       release();
+      activeRuns.delete(runId);
       markRunEnded(runId, ok); // no-op for a run that made no worktrees
     }
   });

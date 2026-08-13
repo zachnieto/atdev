@@ -59,6 +59,7 @@ export interface Config {
   replyLimit: number;
   maxReplyMessages: number;
   maxConcurrentRuns?: number;
+  usageFooter?: boolean;
   lockPort: number;
 }
 
@@ -72,6 +73,7 @@ export const DEFAULTS = {
   replyChainMax: 5,
   replyLimit: 1900, // Discord hard cap is 2000 chars
   maxReplyMessages: 8, // runaway guard; agent is told to use ≤4 blocks
+  usageFooter: true, // tokens/cost/duration line under the reply
   lockPort: 47391, // singleton guard: second instance exits immediately
 };
 

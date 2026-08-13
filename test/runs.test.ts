@@ -1,10 +1,24 @@
-import { CONFIG_FILE, GUILD, REPO1, REPO2, USER } from "./helpers";
+import { CONFIG_FILE, GUILD, REPO1, REPO2, TMP, USER } from "./helpers";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
 import { loadConfig, ROOT } from "../dist/config";
-import { acquire, extractReplies, fill, gatherContext, projectFor, release, renderManifest, splitForDiscord } from "../dist/runs";
+import {
+  acquire,
+  busy,
+  extractReplies,
+  fill,
+  gatherContext,
+  projectFor,
+  recordUsage,
+  release,
+  renderManifest,
+  splitForDiscord,
+  usageLine,
+  USAGE_FILE,
+  withFooter,
+} from "../dist/runs";
 
 const cfg = loadConfig(CONFIG_FILE);
 const prompt = (name: string) => fs.readFileSync(path.join(ROOT, "prompts", name), "utf8");
@@ -187,7 +201,53 @@ test("a DM-shaped message falls back to the channel id", () => {
   assert.ok(fill(prompt("chat.md"), projectFor(cfg, message), message, "(none)").includes(`#${CHANNEL_ID}`));
 });
 
+// ---- usage -------------------------------------------------------------------
+test("usageLine reports tokens, cost and duration — and nothing without usage", () => {
+  assert.equal(
+    usageLine({ code: 0, text: "", sessionId: null, err: "", usage: { input: 44200, output: 800 }, costUsd: 0.204 }, "3.2"),
+    "-# 45,000 tokens · $0.20 · 3.2min",
+  );
+  // a harness that reports no usage gets no footer at all
+  assert.equal(usageLine({ code: 0, text: "", sessionId: null, err: "" }, "3.2"), null);
+  // cost is optional on its own
+  assert.equal(
+    usageLine({ code: 0, text: "", sessionId: null, err: "", usage: { input: 1, output: 2 } }, "0.1"),
+    "-# 3 tokens · 0.1min",
+  );
+});
+
+test("the footer rides on the last chunk when it fits, otherwise it gets its own message", () => {
+  const footer = "-# 3 tokens · 0.1min";
+  assert.deepEqual(withFooter(["a", "b"], footer, 100), ["a", `b\n${footer}`]);
+  const full = "x".repeat(95);
+  assert.deepEqual(withFooter(["a", full], footer, 100), ["a", full, footer], "no room on the last chunk");
+  assert.deepEqual(withFooter(["a"], null, 100), ["a"], "no usage, no footer");
+  assert.deepEqual(withFooter([], footer, 100), [footer]);
+});
+
+test("recordUsage appends one JSON line per run to the (overridable) usage file", () => {
+  assert.equal(USAGE_FILE, path.join(TMP, "usage.jsonl"), "ATDEV_USAGE_FILE must redirect away from the real state/");
+  recordUsage({ runId: "r1", tokensIn: 10, tokensOut: 2, ok: true });
+  recordUsage({ runId: "r2", tokensIn: 3, tokensOut: 1, ok: false });
+  const lines = fs
+    .readFileSync(USAGE_FILE, "utf8")
+    .trim()
+    .split("\n")
+    .map((l) => JSON.parse(l));
+  assert.equal(lines.length, 2);
+  assert.deepEqual(lines[0], { runId: "r1", tokensIn: 10, tokensOut: 2, ok: true });
+  assert.equal(lines[1].runId, "r2");
+});
+
 // ---- global concurrency cap --------------------------------------------------
+test("busy() reports whether a run would have to wait for a slot", async () => {
+  assert.equal(busy(1), false);
+  await acquire(1);
+  assert.equal(busy(1), true, "the only slot is taken");
+  release();
+  assert.equal(busy(1), false);
+});
+
 test("acquire/release holds the cap and hands slots over FIFO", async () => {
   let active = 0;
   let peak = 0;

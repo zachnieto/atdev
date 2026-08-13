@@ -47,6 +47,7 @@ const msg = (over: Record<string, unknown> = {}) =>
     guildId: "G",
     channelId: "CH",
     channel: {},
+    content: "<@BOT> please do the thing",
     member: null,
     mentions: { users: { has: () => false } },
     ...over,
@@ -69,7 +70,7 @@ test("mention/reply resolution: fresh, resume, cross-tier, unknown reference", (
   assert.equal(fresh?.tier, "dev");
   assert.match(fresh!.run.runId, /^[0-9a-f-]{36}$/);
   assert.equal(fresh!.run.sessionId, null);
-  assert.notEqual(evaluate(client, cfg, msg(mention))!.run.runId, fresh!.run.runId, "runId is per-trigger");
+  assert.notEqual(evaluate(client, cfg, msg(mention))!.run!.runId, fresh!.run.runId, "runId is per-trigger");
 
   sessions.recordRun(fresh!.run.runId, { channelId: "CH", guildId: "G", tier: "dev" }, 6 * HOUR);
   sessions.recordSession(fresh!.run.runId, "sess-A", 6 * HOUR);
@@ -102,6 +103,39 @@ test("mention/reply resolution: fresh, resume, cross-tier, unknown reference", (
   assert.equal(crossTier?.mode, "resume");
   assert.equal(crossTier?.tier, "chat", "resume must use the current author's tier");
   assert.equal(crossTier?.run.sessionId, "sess-A");
+});
+
+// ---- control commands --------------------------------------------------------
+test("cancel/status are control matches, not work orders", () => {
+  fs.writeFileSync(sessions.STATE_FILE, JSON.stringify({ runs: {}, byMessage: {}, latestByChannel: {} }));
+
+  for (const content of ["<@BOT> cancel", "<@!BOT>   CANCEL  ", "cancel <@BOT>"]) {
+    const m = evaluate(client, cfg, msg({ ...mention, content }));
+    assert.equal(m?.command, "cancel", `not recognized: ${content}`);
+    assert.equal(m?.tier, "dev");
+    assert.ok(!("run" in m!), "a control command must not mint a run");
+  }
+  assert.equal(evaluate(client, cfg, msg({ ...mention, content: "<@BOT> Status" }))?.command, "status");
+
+  // and nothing was written to the session store
+  const state = JSON.parse(fs.readFileSync(sessions.STATE_FILE, "utf8"));
+  assert.deepEqual(state.runs, {});
+
+  // a chat user may ask for status but not cancel (the tier travels with the match)
+  const chat = msg({ author: { id: "u9", bot: false }, channelId: "c1", ...mention });
+  assert.equal(evaluate(client, cfg, { ...chat, content: "<@BOT> status" } as any)?.tier, "chat");
+  const chatCancel = evaluate(client, cfg, { ...chat, content: "<@BOT> cancel" } as any);
+  assert.equal(chatCancel?.command, "cancel");
+  assert.equal(chatCancel?.tier, "chat", "the tier travels with the match; commands.ts is what denies it");
+
+  // anything else is still a work order
+  const work = evaluate(client, cfg, msg({ ...mention, content: "<@BOT> cancel the release please" }));
+  assert.equal(work?.command, undefined);
+  assert.equal(work?.mode, "fresh");
+  assert.equal(evaluate(client, cfg, msg({ ...mention, content: "<@BOT> statuses" }))?.command, undefined);
+
+  // a stranger's `cancel` is still ignored before anything else
+  assert.equal(evaluate(client, cfg, msg({ author: { id: "rando", bot: false }, ...mention, content: "cancel" })), null);
 });
 
 test("a run past its TTL is not resumed — a mention starts fresh", () => {

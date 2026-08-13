@@ -17,11 +17,25 @@ import type { AccessRule, Config } from "./config";
 import { log } from "./log";
 import { runByMessage, latestRun } from "./sessions";
 
-export interface Match {
+export interface RunMatch {
   tier: string;
   mode: "resume" | "fresh";
   run: { runId: string; sessionId: string | null };
+  command?: undefined;
 }
+
+// A control command (`@bot cancel` / `@bot status`) is not a work order: no
+// runId, no session, no queue — index.ts routes it to commands.ts instead.
+export interface CommandMatch {
+  tier: string;
+  command: "cancel" | "status";
+  mode?: undefined;
+  run?: undefined;
+}
+
+export type Match = RunMatch | CommandMatch;
+
+const CONTROL = /^(cancel|status)$/i;
 
 // `message` is deliberately loose: every field is read through optional chaining
 // because the shapes differ between channel kinds (guild channel vs thread).
@@ -53,6 +67,9 @@ export function evaluate(client: Client, config: Config, message: Message): Matc
     log(`Ignored ${repliedTo ? "follow-up" : "mention"} from unauthorized user ${message.author.id} in ${guild.name}`);
     return null;
   }
+
+  const bare = message.content.replace(/<@[!&]?\w+>/g, "").trim();
+  if (CONTROL.test(bare)) return { tier: rule.tier, command: bare.toLowerCase() as CommandMatch["command"] };
 
   const run = repliedTo ?? (mentioned ? latestRun(message.channelId, ttlMs) : null);
   return { tier: rule.tier, mode: run ? "resume" : "fresh", run: run ?? { runId: randomUUID(), sessionId: null } };

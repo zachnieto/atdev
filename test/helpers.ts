@@ -1,8 +1,9 @@
 // test/helpers.ts — per-file tmp sandbox + a fresh-clone-safe fixture config.
 //
 // IMPORT THIS FIRST in every test file: it points ATDEV_STATE_FILE /
-// ATDEV_WORKTREE_FILE / ATDEV_LOG_FILE at tmp before dist/sessions.js,
-// dist/worktrees.js and dist/log.js read them at module load. node:test runs
+// ATDEV_WORKTREE_FILE / ATDEV_LOG_FILE / ATDEV_USAGE_FILE at tmp before
+// dist/sessions.js, dist/worktrees.js, dist/log.js and dist/runs.js read them at
+// module load. node:test runs
 // each file in its own process, so each gets its own tmp dir and the machine's
 // real state/ and logs/ are never touched.
 //
@@ -17,6 +18,7 @@ export const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "atdev-test-"));
 process.env.ATDEV_STATE_FILE = path.join(TMP, "sessions.json");
 process.env.ATDEV_WORKTREE_FILE = path.join(TMP, "worktrees.json");
 process.env.ATDEV_LOG_FILE = path.join(TMP, "bot.log");
+process.env.ATDEV_USAGE_FILE = path.join(TMP, "usage.jsonl");
 process.on("exit", () => {
   try {
     fs.rmSync(TMP, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });

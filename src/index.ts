@@ -17,6 +17,7 @@ import { Client, GatewayIntentBits, Events, type Message } from "discord.js";
 import { loadConfig, type Config } from "./config";
 import { log } from "./log";
 import { evaluate } from "./triggers";
+import { handleCommand } from "./commands";
 import { startRun } from "./runs";
 import { startMcpServer } from "./mcp-server";
 import { sweep } from "./worktrees";
@@ -51,7 +52,8 @@ export function startBot(config: Config) {
     try {
       const match = evaluate(client, config, message);
       if (!match) return;
-      await startRun(config, message, match);
+      if (match.command) await handleCommand(config, message, match.command, match.tier);
+      else await startRun(config, message, match);
     } catch (e: any) {
       log(`Handler error: ${e?.stack || e}`);
       await message.react("❌").catch(() => {});
