@@ -17,8 +17,6 @@ const DEFAULTS = {
   replyChainMax: 5,
   replyLimit: 1900, // Discord hard cap is 2000 chars
   maxReplyMessages: 8, // runaway guard; agent is told to use ≤4 blocks
-  statusEditMinMs: 4500, // Discord edit rate-limit headroom
-  statusTail: 10, // activity lines kept in the status message
   lockPort: 47391, // singleton guard: second instance exits immediately
 };
 

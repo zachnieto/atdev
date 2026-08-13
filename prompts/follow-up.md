@@ -12,7 +12,7 @@ Permalink: {PERMALINK}
 
 {CONTEXT}
 
-Act on it as a continuation of the prior conversation — same worktree, same branch, same PR unless this is genuinely new work. Your tool activity is live-streamed to a Discord status message while you work, so no interim updates are needed. As before, end your final message with the Discord reply wrapped EXACTLY in:
+Act on it as a continuation of the prior conversation — same worktree, same branch, same PR unless this is genuinely new work. While you work the requester just sees a typing indicator, so no interim updates are needed. As before, end your final message with the Discord reply wrapped EXACTLY in:
 
 <reply>
 ...the reply text...

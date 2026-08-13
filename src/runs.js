@@ -23,7 +23,6 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { DEFAULTS, ROOT } = require("./config");
 const { log } = require("./log");
-const { StatusReporter, describeToolUse } = require("./status");
 const { recordRun, recordSession, recordMessage } = require("./sessions");
 const { markRunEnded } = require("./worktrees");
 const claude = require("./runners/claude");
@@ -47,7 +46,6 @@ function enqueue(key, job) {
 // released slot is handed straight to the next waiter (never decremented and
 // re-taken), so the cap holds even when a new run arrives at that moment.
 const slots = { active: 0, waiting: [] };
-const busy = (max) => slots.active >= max;
 async function acquire(max) {
   if (slots.active < max) slots.active++;
   else await new Promise((r) => slots.waiting.push(r)); // release() hands its slot over
@@ -238,21 +236,13 @@ async function startRun(config, message, { tier, mode, run }) {
     const track = (m) => m && recordMessage(runId, m.id, ttlMs);
 
     const max = config.maxConcurrentRuns ?? 3;
-    const queued = busy(max);
-    const reporter = new StatusReporter(message, config);
-    if (queued) reporter.header = "⏳ **Queued**";
-    await reporter.start();
-    track(reporter.statusMsg);
+    // Discord's typing indicator lasts ~10s per ping; refresh while the run
+    // (or its queue wait) is live. It clears itself when the reply posts.
+    message.channel.sendTyping().catch(() => {});
+    const typing = setInterval(() => message.channel.sendTyping().catch(() => {}), 8000);
     const onEvent = (ev) => {
       // Save at run start so a crashed run is still resumable.
       if (ev.type === "init") recordSession(runId, ev.sessionId, ttlMs);
-      if (ev.type === "tool") {
-        const d = describeToolUse(ev.name, ev.input);
-        if (d) reporter.tool(d);
-      }
-      if (ev.type === "text" && ev.text?.trim() && !ev.text.includes("<reply>")) {
-        reporter.note(`» ${ev.text.replace(/\s+/g, " ").trim().slice(0, 110)}`);
-      }
     };
     // A dev run starts in the workspace and never has a repo as its cwd: it
     // reads the checkouts (all of them --add-dir'd) to route, and writes only in
@@ -272,10 +262,6 @@ async function startRun(config, message, { tier, mode, run }) {
       });
 
     await acquire(max);
-    if (queued) {
-      reporter.header = "🔄 **Working**";
-      reporter.markDirty();
-    }
     // ok drives worktree disposal: kept for inspection unless the run succeeded.
     let ok = false;
     try {
@@ -288,7 +274,6 @@ async function startRun(config, message, { tier, mode, run }) {
         res = await spawn(fill(TEMPLATE_FOLLOWUP, project, message, context), run.sessionId);
         if (res.code !== 0) {
           log(`Resume failed (exit ${res.code}); retrying as a fresh session. ${res.err.slice(0, 200)}`);
-          reporter.note("resume failed — restarting as a fresh session");
           res = null;
         }
       }
@@ -303,12 +288,10 @@ async function startRun(config, message, { tier, mode, run }) {
 
       if (ok) {
         if (res.sessionId) recordSession(runId, res.sessionId, ttlMs);
-        await reporter.finish(`✅ **Done** in ${mins}min`);
         await message.react("✅").catch(() => {});
         for (const m of await postReplies(message, extractReplies(res.text, config.replyLimit, config.maxReplyMessages))) track(m);
       } else {
         log(`Run error output: ${(res.err || res.text).slice(0, 500)}`);
-        await reporter.finish(`❌ **Failed** (exit ${res.code}) after ${mins}min`);
         await message.react("❌").catch(() => {});
         const errTail = (res.err || res.text || "").trim().slice(-400).replaceAll("```", "'''");
         const detail = errTail ? `\n\`\`\`\n${errTail}\n\`\`\`` : "";
@@ -320,6 +303,7 @@ async function startRun(config, message, { tier, mode, run }) {
         );
       }
     } finally {
+      clearInterval(typing);
       release();
       markRunEnded(runId, ok); // no-op for a run that made no worktrees
     }

@@ -71,8 +71,6 @@
   "replyChainMax": 5,
   "replyLimit": 1900,
   "maxReplyMessages": 8,
-  "statusEditMinMs": 4500,
-  "statusTail": 10,
   "maxConcurrentRuns": 3,
   "lockPort": 47391
 }

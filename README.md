@@ -104,8 +104,6 @@ session at it, add to that repo's `.mcp.json`:
 - `replyChainMax` — how far up a Discord reply chain to walk for context.
 - `replyLimit` — max characters per posted Discord message (Discord's hard cap is 2000).
 - `maxReplyMessages` — cap on how many `<reply>` blocks/chunks get posted per run.
-- `statusEditMinMs` — minimum interval between edits to the live status message.
-- `statusTail` — how many recent activity lines the status message shows.
 - `maxConcurrentRuns` — global cap on harness processes running at once; excess runs queue FIFO.
 - `lockPort` — localhost TCP port used as a singleton lock (a second launch exits immediately).
 

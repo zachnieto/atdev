@@ -4,8 +4,8 @@
 //          byMessage: {<bot message id>: runId},
 //          latestByChannel: {channelId: runId}}
 //
-// The run is the unit of conversation. Every bot message posted for a run (the
-// status message and each reply chunk) is recorded, so an unpinged Discord reply
+// The run is the unit of conversation. Every bot message posted for a run
+// (each reply chunk) is recorded, so an unpinged Discord reply
 // to any of them resumes that exact session. sessionId is written the moment the
 // harness emits its init event, so a crashed run is still resumable.
 //
