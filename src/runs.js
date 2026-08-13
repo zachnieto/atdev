@@ -14,6 +14,10 @@
 //  - Multi-message replies: the agent may emit several <reply> blocks; each is
 //    posted as its own message. Nothing is hard-truncated — oversized blocks
 //    are split at line boundaries as a last resort.
+//  - Worktrees: a dev run starts in the workspace, not in a repo, and creates
+//    its own worktree per repo it edits (see worktrees.js). Runs are therefore
+//    serialized only against their own follow-ups; how many run at once is
+//    capped globally by config.maxConcurrentRuns.
 
 const fs = require("node:fs");
 const path = require("node:path");
@@ -21,9 +25,12 @@ const { DEFAULTS, ROOT } = require("./config");
 const { log } = require("./log");
 const { StatusReporter, describeToolUse } = require("./status");
 const { recordRun, recordSession, recordMessage } = require("./sessions");
+const { markRunEnded } = require("./worktrees");
 const claude = require("./runners/claude");
 
 // ---- serialization -----------------------------------------------------------
+// Per-run queue: a run's follow-ups never overlap each other. Different runs are
+// independent now that each works in its own worktree.
 const queues = new Map();
 function enqueue(key, job) {
   const prev = queues.get(key) || Promise.resolve();
@@ -33,6 +40,22 @@ function enqueue(key, job) {
     next.catch(() => {}),
   );
   return next;
+}
+
+// ---- global concurrency ------------------------------------------------------
+// At most maxConcurrentRuns harness processes at a time; the rest wait FIFO. A
+// released slot is handed straight to the next waiter (never decremented and
+// re-taken), so the cap holds even when a new run arrives at that moment.
+const slots = { active: 0, waiting: [] };
+const busy = (max) => slots.active >= max;
+async function acquire(max) {
+  if (slots.active < max) slots.active++;
+  else await new Promise((r) => slots.waiting.push(r)); // release() hands its slot over
+}
+function release() {
+  const next = slots.waiting.shift();
+  if (next) next();
+  else slots.active--;
 }
 
 // ---- context gathering -------------------------------------------------------
@@ -88,9 +111,7 @@ async function gatherContext(config, message, { backscroll }) {
 }
 
 // ---- prompts -----------------------------------------------------------------
-// Dev fresh still uses the single-repo work order at the repo root; the
-// manifest-driven prompts/work-order.md lands with worktrees in Phase 4.
-const TEMPLATE_DEV = fs.readFileSync(path.join(ROOT, "work-order.md"), "utf8");
+const TEMPLATE_DEV = fs.readFileSync(path.join(ROOT, "prompts", "work-order.md"), "utf8");
 const TEMPLATE_CHAT = fs.readFileSync(path.join(ROOT, "prompts", "chat.md"), "utf8");
 const TEMPLATE_FOLLOWUP = fs.readFileSync(path.join(ROOT, "prompts", "follow-up.md"), "utf8");
 
@@ -126,16 +147,20 @@ function projectFor(config, message) {
     base: first.base,
     manifest: renderManifest(repos),
     addDirs: repos.slice(1).map((r) => r.path),
+    workflowNotes: (config.workflowNotes ?? "").trim(),
   };
 }
 
 function fill(template, project, message, context) {
-  return template
+  const notes = project.workflowNotes ?? "";
+  // An operator with no workflow notes shouldn't get a dangling heading.
+  return (notes ? template : template.replace(/#+ Workflow notes[^\n]*\n+(?=\{WORKFLOW_NOTES\})/, ""))
     .replaceAll("{PROJECT}", project.name)
     .replaceAll("{REPO}", project.repo)
     .replaceAll("{PR_NOTE}", project.prNote)
     .replaceAll("{BASE}", project.base)
     .replaceAll("{REPOS_MANIFEST}", project.manifest ?? "")
+    .replaceAll("{WORKFLOW_NOTES}", notes)
     .replaceAll("{CHANNEL}", message.channel?.name ?? message.channelId)
     .replaceAll("{PERMALINK}", permalink(message))
     .replaceAll("{CONTEXT}", context)
@@ -205,17 +230,17 @@ async function startRun(config, message, { tier, mode, run }) {
   );
   await message.react("👀").catch(() => {});
 
-  // Serialize whatever shares a working tree. Dev runs all edit the guild's one
-  // checkout, so they queue on it; chat runs are read-only and only queue
-  // against their own follow-ups. Phase 4's worktrees drop the dev case.
-  const queueKey = tier === "dev" ? project.repo : runId;
-
-  return enqueue(queueKey, async () => {
+  // Only a run's own follow-ups need serializing — dev runs edit worktrees, not
+  // the shared checkouts, so nothing else contends.
+  return enqueue(runId, async () => {
     const started = Date.now();
     recordRun(runId, { channelId: message.channelId, guildId: message.guildId, tier }, ttlMs);
     const track = (m) => m && recordMessage(runId, m.id, ttlMs);
 
+    const max = config.maxConcurrentRuns ?? 3;
+    const queued = busy(max);
     const reporter = new StatusReporter(message, config);
+    if (queued) reporter.header = "⏳ **Queued**";
     await reporter.start();
     track(reporter.statusMsg);
     const onEvent = (ev) => {
@@ -229,56 +254,74 @@ async function startRun(config, message, { tier, mode, run }) {
         reporter.note(`» ${ev.text.replace(/\s+/g, " ").trim().slice(0, 110)}`);
       }
     };
+    // A dev run starts in the workspace and never has a repo as its cwd: it
+    // reads the checkouts (all of them --add-dir'd) to route, and writes only in
+    // the worktrees it creates under the workspace. Chat stays as it was.
+    const dev = tier === "dev";
+    if (dev) fs.mkdirSync(config.workspaceDir, { recursive: true });
     const spawn = (prompt, resume) =>
       claude.run({
         harness: config.harness,
-        cwd: project.repo,
+        cwd: dev ? config.workspaceDir : project.repo,
         prompt,
         resumeId: resume,
         tier,
-        // Chat reads across every repo the guild offers; dev stays in its checkout.
-        addDirs: tier === "chat" ? project.addDirs : [],
+        env: dev ? { ATDEV_RUN_ID: runId, ATDEV_WORKTREE_HELPER: path.join(__dirname, "worktrees.js") } : undefined,
+        addDirs: dev ? [project.repo, ...project.addDirs] : project.addDirs,
         onEvent,
       });
 
-    let res;
-    if (mode === "resume" && run.sessionId) {
-      // Follow-up: resume this run's session; lean prompt, reply-chain only
-      // (the session already has the earlier context).
-      const context = await gatherContext(config, message, { backscroll: false });
-      log(`Resuming session ${run.sessionId} for run ${runId}`);
-      res = await spawn(fill(TEMPLATE_FOLLOWUP, project, message, context), run.sessionId);
-      if (res.code !== 0) {
-        log(`Resume failed (exit ${res.code}); retrying as a fresh session. ${res.err.slice(0, 200)}`);
-        reporter.note("resume failed — restarting as a fresh session");
-        res = null;
+    await acquire(max);
+    if (queued) {
+      reporter.header = "🔄 **Working**";
+      reporter.markDirty();
+    }
+    // ok drives worktree disposal: kept for inspection unless the run succeeded.
+    let ok = false;
+    try {
+      let res;
+      if (mode === "resume" && run.sessionId) {
+        // Follow-up: resume this run's session; lean prompt, reply-chain only
+        // (the session already has the earlier context).
+        const context = await gatherContext(config, message, { backscroll: false });
+        log(`Resuming session ${run.sessionId} for run ${runId}`);
+        res = await spawn(fill(TEMPLATE_FOLLOWUP, project, message, context), run.sessionId);
+        if (res.code !== 0) {
+          log(`Resume failed (exit ${res.code}); retrying as a fresh session. ${res.err.slice(0, 200)}`);
+          reporter.note("resume failed — restarting as a fresh session");
+          res = null;
+        }
       }
-    }
-    if (!res) {
-      const context = await gatherContext(config, message, { backscroll: true });
-      res = await spawn(fill(tier === "chat" ? TEMPLATE_CHAT : TEMPLATE_DEV, project, message, context), null);
-    }
+      if (!res) {
+        const context = await gatherContext(config, message, { backscroll: true });
+        res = await spawn(fill(tier === "chat" ? TEMPLATE_CHAT : TEMPLATE_DEV, project, message, context), null);
+      }
 
-    const mins = ((Date.now() - started) / 60000).toFixed(1);
-    log(`Run ${runId} finished in ${mins}min (exit ${res.code}, session ${res.sessionId ?? "?"}) for message ${message.id}`);
+      const mins = ((Date.now() - started) / 60000).toFixed(1);
+      log(`Run ${runId} finished in ${mins}min (exit ${res.code}, session ${res.sessionId ?? "?"}) for message ${message.id}`);
+      ok = res.code === 0 && !!res.text;
 
-    if (res.code === 0 && res.text) {
-      if (res.sessionId) recordSession(runId, res.sessionId, ttlMs);
-      await reporter.finish(`✅ **Done** in ${mins}min`);
-      await message.react("✅").catch(() => {});
-      for (const m of await postReplies(message, extractReplies(res.text, config.replyLimit, config.maxReplyMessages))) track(m);
-    } else {
-      log(`Run error output: ${(res.err || res.text).slice(0, 500)}`);
-      await reporter.finish(`❌ **Failed** (exit ${res.code}) after ${mins}min`);
-      await message.react("❌").catch(() => {});
-      const errTail = (res.err || res.text || "").trim().slice(-400).replaceAll("```", "'''");
-      const detail = errTail ? `\n\`\`\`\n${errTail}\n\`\`\`` : "";
-      track(
-        await message.reply({
-          content: `⚠️ The agent run failed (exit ${res.code}).${detail}`,
-          allowedMentions: { repliedUser: true },
-        }),
-      );
+      if (ok) {
+        if (res.sessionId) recordSession(runId, res.sessionId, ttlMs);
+        await reporter.finish(`✅ **Done** in ${mins}min`);
+        await message.react("✅").catch(() => {});
+        for (const m of await postReplies(message, extractReplies(res.text, config.replyLimit, config.maxReplyMessages))) track(m);
+      } else {
+        log(`Run error output: ${(res.err || res.text).slice(0, 500)}`);
+        await reporter.finish(`❌ **Failed** (exit ${res.code}) after ${mins}min`);
+        await message.react("❌").catch(() => {});
+        const errTail = (res.err || res.text || "").trim().slice(-400).replaceAll("```", "'''");
+        const detail = errTail ? `\n\`\`\`\n${errTail}\n\`\`\`` : "";
+        track(
+          await message.reply({
+            content: `⚠️ The agent run failed (exit ${res.code}).${detail}`,
+            allowedMentions: { repliedUser: true },
+          }),
+        );
+      }
+    } finally {
+      release();
+      markRunEnded(runId, ok); // no-op for a run that made no worktrees
     }
   });
 }
@@ -286,6 +329,8 @@ async function startRun(config, message, { tier, mode, run }) {
 module.exports = {
   startRun,
   enqueue,
+  acquire,
+  release,
   gatherContext,
   fill,
   projectFor,

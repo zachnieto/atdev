@@ -19,8 +19,21 @@ const { log } = require("./src/log");
 const { evaluate } = require("./src/triggers");
 const { startRun } = require("./src/runs");
 const { startMcpServer } = require("./src/mcp-server");
+const { sweep } = require("./src/worktrees");
 
 function startBot(config) {
+  // Collect expired/orphaned worktrees at startup and hourly (a crashed run
+  // leaves its worktree behind on purpose — this is what eventually reaps it).
+  const sweepWorktrees = () => {
+    try {
+      sweep(config);
+    } catch (e) {
+      log(`Worktree sweep failed: ${e?.stack || e}`);
+    }
+  };
+  sweepWorktrees();
+  setInterval(sweepWorktrees, 60 * 60 * 1000);
+
   const client = new Client({
     // MessageContent is needed for backscroll (non-mention messages); the bot's
     // portal toggle already has it on (the triage routines read channels via REST).

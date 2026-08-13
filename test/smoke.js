@@ -10,15 +10,19 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
-// Must be set before src/sessions.js is loaded — production state stays untouched.
+// Must be set before src/sessions.js and src/worktrees.js load — production
+// state stays untouched.
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "neatz-test-"));
 process.env.NEATZ_STATE_FILE = path.join(TMP, "sessions.json");
+process.env.NEATZ_WORKTREE_FILE = path.join(TMP, "worktrees.json");
 
+const { execFileSync } = require("node:child_process");
 const { loadConfig, ROOT } = require("../src/config");
 const { matchAccess, evaluate } = require("../src/triggers");
 const sessions = require("../src/sessions");
+const worktrees = require("../src/worktrees");
 const claude = require("../src/runners/claude");
-const { extractReplies, splitForDiscord, fill, gatherContext, projectFor, renderManifest } = require("../src/runs");
+const { extractReplies, splitForDiscord, fill, gatherContext, projectFor, renderManifest, acquire, release } = require("../src/runs");
 
 const HOUR = 60 * 60 * 1000;
 
@@ -358,10 +362,9 @@ function fakeConversation(guildId) {
 
 (async () => {
   const client = { user: { id: "bot" } };
-  const templates = {
-    fresh: fs.readFileSync(path.join(ROOT, "work-order.md"), "utf8"),
-    followup: fs.readFileSync(path.join(ROOT, "follow-up.md"), "utf8"),
-  };
+  // The dev fresh template is manifest-driven since Phase 4, so it has no
+  // pre-refactor counterpart to compare against; follow-up still does.
+  const templates = { followup: fs.readFileSync(path.join(ROOT, "prompts", "follow-up.md"), "utf8") };
   for (const guildId of Object.keys(PROJECTS)) {
     const message = fakeConversation(guildId);
     message.inGuild = () => true;
@@ -372,7 +375,7 @@ function fakeConversation(guildId) {
     assert.strictEqual(match.tier, "dev");
 
     const project = projectFor(cfg, message);
-    const { manifest, addDirs, ...single } = project;
+    const { manifest, addDirs, workflowNotes, ...single } = project;
     assert.deepStrictEqual(single, PROJECTS[guildId], "config does not reproduce the old PROJECTS entry");
     assert.deepStrictEqual(addDirs, [], "single-repo guilds offer nothing extra");
 
@@ -380,7 +383,7 @@ function fakeConversation(guildId) {
       const ctxNew = await gatherContext(cfg, message, { backscroll });
       const ctxOld = await oldGatherContext(message, { backscroll });
       assert.strictEqual(ctxNew, ctxOld, "context text differs");
-      for (const t of [templates.fresh, templates.followup]) {
+      for (const t of [templates.followup]) {
         assert.strictEqual(
           fill(t, project, message, ctxNew),
           oldFill(t, PROJECTS[guildId], message, ctxOld),
@@ -414,6 +417,137 @@ function fakeConversation(guildId) {
     assert.ok(out.includes(multi.content) && out.includes("#general"));
   }
   assert.ok(fill(chat, multiProject, multi, ctx).includes(cfg.repos["breaking-point"].path), "manifest missing from chat prompt");
+
+  // ---- dev prompt fill: manifest + workflow notes ----------------------------
+  {
+    const work = fs.readFileSync(path.join(ROOT, "prompts", "work-order.md"), "utf8");
+    assert.ok(cfg.workflowNotes, "config.json has no workflowNotes to test with");
+    const withNotes = fill(work, multiProject, multi, ctx);
+    assert.ok(!/\{[A-Z_]+\}/.test(withNotes), `unfilled placeholder: ${withNotes.match(/\{[A-Z_]+\}/)}`);
+    assert.ok(withNotes.includes(cfg.workflowNotes.trim()), "workflow notes missing");
+    assert.ok(withNotes.includes("## Workflow notes"), "heading dropped while notes exist");
+    assert.ok(withNotes.includes("ATDEV_WORKTREE_HELPER") && withNotes.includes("### neatqueue"), "worktree/manifest sections missing");
+
+    // empty notes: the placeholder AND its now-pointless heading both go
+    const without = fill(work, { ...multiProject, workflowNotes: "" }, multi, ctx);
+    assert.ok(!/\{[A-Z_]+\}/.test(without), `unfilled placeholder: ${without.match(/\{[A-Z_]+\}/)}`);
+    assert.ok(!without.includes("Workflow notes"), "dangling heading left behind");
+    assert.ok(without.includes("### neatqueue"), "rest of the prompt survived the strip");
+  }
+
+  // ---- worktrees: registry + lifecycle against a real git repo ---------------
+  {
+    const sh = (cwd, ...args) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    const origin = path.join(TMP, "origin");
+    const repoPath = path.join(TMP, "repo");
+    fs.mkdirSync(origin, { recursive: true });
+    execFileSync("git", ["init", "-q", "-b", "main", origin], { stdio: "ignore" });
+    fs.writeFileSync(path.join(origin, "README.md"), "hi\n");
+    sh(origin, "add", "-A");
+    sh(origin, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init");
+    execFileSync("git", ["clone", "-q", "--no-hardlinks", origin, repoPath], { stdio: "ignore" });
+
+    const wcfg = {
+      workspaceDir: path.join(TMP, "ws"),
+      worktreeTtlHours: 24,
+      repos: { tmp: { path: repoPath, base: "origin/main" } },
+    };
+    const wtRoot = path.join(wcfg.workspaceDir, "worktrees");
+    const listed = () => sh(repoPath, "worktree", "list").trim().split("\n").length;
+    const baseline = listed();
+
+    process.env.ATDEV_RUN_ID = "abcdef12-3456-7890-aaaa-bbbbbbbbbbbb";
+    const p1 = worktrees.create("tmp", null, wcfg);
+    assert.strictEqual(p1, path.join(wtRoot, "tmp-abcdef12").replaceAll("\\", "/"), "printed path");
+    assert.ok(fs.existsSync(path.join(p1, "README.md")), "worktree not checked out");
+    assert.strictEqual(sh(p1, "rev-parse", "--abbrev-ref", "HEAD").trim(), "atdev/abcdef12");
+    assert.strictEqual(listed(), baseline + 1);
+    assert.strictEqual(worktrees.load()["tmp-abcdef12"].status, "active");
+
+    // failure keeps the worktree, marked
+    worktrees.markRunEnded(process.env.ATDEV_RUN_ID, false);
+    assert.strictEqual(worktrees.load()["tmp-abcdef12"].status, "failed");
+    assert.ok(fs.existsSync(p1), "failed run's worktree was removed");
+
+    // success removes it, prunes, and drops the entry
+    worktrees.markRunEnded(process.env.ATDEV_RUN_ID, true);
+    assert.deepStrictEqual(worktrees.load(), {}, "registry entry survived removal");
+    assert.ok(!fs.existsSync(p1), "worktree directory survived removal");
+    assert.strictEqual(listed(), baseline, "git still lists the removed worktree");
+
+    // a run with no worktrees is a no-op
+    worktrees.markRunEnded("no-such-run", true);
+    assert.deepStrictEqual(worktrees.load(), {});
+
+    // the branch outlives the worktree, so a follow-up re-checks it out
+    const p2 = worktrees.create("tmp", null, wcfg);
+    assert.strictEqual(p2, p1);
+    assert.strictEqual(sh(p2, "rev-parse", "--abbrev-ref", "HEAD").trim(), "atdev/abcdef12");
+
+    // sweep: past TTL goes regardless of status, and untracked dirs go too
+    const reg = worktrees.load();
+    reg["tmp-abcdef12"].createdAt = new Date(Date.now() - 48 * HOUR).toISOString();
+    fs.writeFileSync(process.env.NEATZ_WORKTREE_FILE, JSON.stringify(reg));
+    const orphan = path.join(wtRoot, "tmp-deadbeef");
+    fs.mkdirSync(orphan, { recursive: true });
+    fs.writeFileSync(path.join(orphan, "junk.txt"), "x");
+    worktrees.sweep(wcfg);
+    assert.deepStrictEqual(worktrees.load(), {}, "expired entry survived the sweep");
+    assert.ok(!fs.existsSync(p2), "expired worktree survived the sweep");
+    assert.ok(!fs.existsSync(orphan), "orphan directory survived the sweep");
+    assert.strictEqual(listed(), baseline);
+
+    // a still-young entry is left alone (and is not mistaken for an orphan)
+    const p3 = worktrees.create("tmp", "origin/main", wcfg);
+    worktrees.sweep(wcfg);
+    assert.ok(fs.existsSync(p3), "sweep ate a live worktree");
+    worktrees.markRunEnded(process.env.ATDEV_RUN_ID, true);
+    delete process.env.ATDEV_RUN_ID;
+  }
+
+  // ---- worktree CLI: arguments are validated before anything happens ---------
+  {
+    const cli = (args, env) => {
+      try {
+        execFileSync(process.execPath, [path.join(ROOT, "src", "worktrees.js"), ...args], {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+          env: { ...process.env, ...env },
+        });
+        return { code: 0, stderr: "" };
+      } catch (e) {
+        return { code: e.status, stderr: String(e.stderr) };
+      }
+    };
+    const withRun = { ATDEV_RUN_ID: "11111111-2222-3333-4444-555555555555" };
+    let r = cli(["create", "../../etc"], withRun);
+    assert.strictEqual(r.code, 1);
+    assert.match(r.stderr, /unknown repo/, "arbitrary paths must be rejected");
+    r = cli(["create", "neatqueue"], { ATDEV_RUN_ID: "" });
+    assert.strictEqual(r.code, 1);
+    assert.match(r.stderr, /ATDEV_RUN_ID/, "missing run id must be rejected");
+    r = cli([], withRun);
+    assert.strictEqual(r.code, 1);
+    assert.match(r.stderr, /usage/);
+  }
+
+  // ---- global concurrency cap -------------------------------------------------
+  {
+    let active = 0;
+    let peak = 0;
+    const order = [];
+    const job = async (i) => {
+      await acquire(2);
+      order.push(i);
+      peak = Math.max(peak, ++active);
+      await new Promise((r) => setTimeout(r, 15));
+      active--;
+      release();
+    };
+    await Promise.all([0, 1, 2, 3, 4].map(job));
+    assert.strictEqual(peak, 2, `peak concurrency ${peak}, expected the configured 2`);
+    assert.deepStrictEqual(order, [0, 1, 2, 3, 4], "waiters did not run FIFO");
+  }
 
   fs.rmSync(TMP, { recursive: true, force: true });
   console.log("smoke ok");
