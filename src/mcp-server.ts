@@ -15,8 +15,8 @@ import http from "node:http";
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { ChannelType, Client } from "discord.js";
-import { McpConfig } from "./config";
+import { ChannelType, type Client } from "discord.js";
+import type { McpConfig } from "./config";
 
 function typeName(t: number) {
   return ChannelType[t] ?? String(t);
@@ -302,7 +302,7 @@ export function startMcpServer(
       });
       await server.connect(transport);
       await transport.handleRequest(req, res); // transport itself routes GET/POST/DELETE
-    } catch (e) {
+    } catch {
       if (!res.headersSent) {
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32603, message: "Internal server error" }, id: null }));

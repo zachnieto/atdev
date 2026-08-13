@@ -12,8 +12,8 @@
 // a chat user replying into a dev conversation gets chat restrictions.
 
 import { randomUUID } from "node:crypto";
-import { Client, Message } from "discord.js";
-import { AccessRule, Config } from "./config";
+import type { Client, Message } from "discord.js";
+import type { AccessRule, Config } from "./config";
 import { log } from "./log";
 import { runByMessage, latestRun } from "./sessions";
 

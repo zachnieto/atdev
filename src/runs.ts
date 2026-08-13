@@ -21,13 +21,13 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { Message } from "discord.js";
-import { Config, DEFAULTS, ROOT, RepoConfig } from "./config";
+import type { Message } from "discord.js";
+import { type Config, DEFAULTS, ROOT, type RepoConfig } from "./config";
 import { log } from "./log";
 import { recordRun, recordSession, recordMessage } from "./sessions";
 import { markRunEnded } from "./worktrees";
-import { Match } from "./triggers";
-import { RunnerEvent, RunResult } from "./runners/claude";
+import type { Match } from "./triggers";
+import type { RunnerEvent, RunResult } from "./runners/claude";
 import * as claude from "./runners/claude";
 
 export interface Project {
@@ -140,9 +140,13 @@ function reposFor(config: Config, message: Message): (RepoConfig & { name: strin
 export function renderManifest(repos: (RepoConfig & { name: string })[]) {
   return repos
     .map((r) =>
-      [`### ${r.name}`, `- path: ${r.path}`, `- base: ${r.base}`, `- description: ${r.description ?? ""}`, `- notes: ${r.notes ?? ""}`].join(
-        "\n",
-      ),
+      [
+        `### ${r.name}`,
+        `- path: ${r.path}`,
+        `- base: ${r.base}`,
+        `- description: ${r.description ?? ""}`,
+        `- notes: ${r.notes ?? ""}`,
+      ].join("\n"),
     )
     .join("\n\n");
 }
@@ -164,18 +168,20 @@ export function projectFor(config: Config, message: Message): Project {
 export function fill(template: string, project: Project, message: Message, context: string) {
   const notes = project.workflowNotes ?? "";
   // An operator with no workflow notes shouldn't get a dangling heading.
-  return (notes ? template : template.replace(/#+ Workflow notes[^\n]*\n+(?=\{WORKFLOW_NOTES\})/, ""))
-    .replaceAll("{PROJECT}", project.name)
-    .replaceAll("{REPO}", project.repo)
-    .replaceAll("{PR_NOTE}", project.prNote)
-    .replaceAll("{BASE}", project.base)
-    .replaceAll("{REPOS_MANIFEST}", project.manifest ?? "")
-    .replaceAll("{WORKFLOW_NOTES}", notes)
-    // `name` only exists on guild channels; DMs fall back to the id.
-    .replaceAll("{CHANNEL}", (message.channel as any)?.name ?? message.channelId)
-    .replaceAll("{PERMALINK}", permalink(message))
-    .replaceAll("{CONTEXT}", context)
-    .replaceAll("{CONTENT}", message.content);
+  return (
+    (notes ? template : template.replace(/#+ Workflow notes[^\n]*\n+(?=\{WORKFLOW_NOTES\})/, ""))
+      .replaceAll("{PROJECT}", project.name)
+      .replaceAll("{REPO}", project.repo)
+      .replaceAll("{PR_NOTE}", project.prNote)
+      .replaceAll("{BASE}", project.base)
+      .replaceAll("{REPOS_MANIFEST}", project.manifest ?? "")
+      .replaceAll("{WORKFLOW_NOTES}", notes)
+      // `name` only exists on guild channels; DMs fall back to the id.
+      .replaceAll("{CHANNEL}", (message.channel as any)?.name ?? message.channelId)
+      .replaceAll("{PERMALINK}", permalink(message))
+      .replaceAll("{CONTEXT}", context)
+      .replaceAll("{CONTENT}", message.content)
+  );
 }
 
 // ---- reply extraction --------------------------------------------------------
@@ -303,7 +309,8 @@ export async function startRun(config: Config, message: Message, { tier, mode, r
       if (ok) {
         if (res.sessionId) recordSession(runId, res.sessionId, ttlMs);
         await message.react("✅").catch(() => {});
-        for (const m of await postReplies(message, extractReplies(res.text, config.replyLimit, config.maxReplyMessages))) track(m);
+        for (const m of await postReplies(message, extractReplies(res.text, config.replyLimit, config.maxReplyMessages)))
+          track(m);
       } else {
         log(`Run error output: ${(res.err || res.text).slice(0, 500)}`);
         await message.react("❌").catch(() => {});

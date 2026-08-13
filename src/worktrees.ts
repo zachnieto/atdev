@@ -16,7 +16,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { Config, ROOT, loadConfig } from "./config";
+import { type Config, ROOT, loadConfig } from "./config";
 import { log } from "./log";
 
 export interface WorktreeEntry {

@@ -13,8 +13,8 @@
 
 import "dotenv/config";
 import net from "node:net";
-import { Client, GatewayIntentBits, Events, Message } from "discord.js";
-import { loadConfig, Config } from "./config";
+import { Client, GatewayIntentBits, Events, type Message } from "discord.js";
+import { loadConfig, type Config } from "./config";
 import { log } from "./log";
 import { evaluate } from "./triggers";
 import { startRun } from "./runs";

@@ -80,7 +80,7 @@ function resolvePath(p: string) {
 }
 
 export function loadConfig(file = path.join(ROOT, "config.json")): Config {
-  let raw;
+  let raw: string;
   try {
     raw = fs.readFileSync(file, "utf8");
   } catch {
