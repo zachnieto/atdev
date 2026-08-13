@@ -128,6 +128,28 @@ Operator-specific process (issue tracker conventions, PR checklist, whatever) be
 in `config.workflowNotes`, not baked into the templates — it's config, not code, and
 it's the one thing dev runs get that chat runs don't.
 
+## Development
+
+```
+npm test           # build (src + test) and run the node:test suite
+npm run lint       # biome check .   — formatter + linter, read-only
+npm run format     # biome check --write .
+npx tsc --noEmit   # typecheck
+```
+
+Tests are TypeScript in `test/`, compiled by their own `test/tsconfig.json` into
+`dist-test/` (so `dist/` stays production-only) and run with node's built-in test
+runner — no framework, no mocks beyond structural fakes. They import the *built*
+`dist/`, so `npm test` builds first. The suite is self-contained: it builds its own
+config fixture in a temp directory and redirects `ATDEV_STATE_FILE`,
+`ATDEV_WORKTREE_FILE` and `ATDEV_LOG_FILE` there, so it never reads or writes your
+`config.json`, `.env`, `state/` or `logs/` — a fresh clone with none of them passes.
+
+A committed `.githooks/pre-commit` runs `biome ci .` and `tsc --noEmit` and fails the
+commit on either. `npm install` activates it (the `prepare` script sets
+`core.hooksPath`). CI (`.github/workflows/ci.yml`) runs the same two checks plus
+`npm test` on Linux and Windows.
+
 ## Security model
 
 - **Access rules run before any AI does.** `src/triggers.ts` checks `config.access`
