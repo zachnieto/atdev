@@ -6,7 +6,7 @@
 // Claude-specific about the stream shape stays inside this file.
 
 import { spawn, execFile } from "node:child_process";
-import { HarnessConfig } from "../config";
+import type { HarnessConfig } from "../config";
 import { log } from "../log";
 
 // The normalized adapter contract: any second harness emits these same events.
@@ -42,14 +42,32 @@ export function argv(
   harness: HarnessConfig,
   { tier = "dev", resumeId, addDirs = [] }: { tier?: string; resumeId?: string | null; addDirs?: string[] } = {},
 ): string[] {
-  const args = ["-p", "--output-format", "stream-json", "--verbose", ...(harness.args ?? []), ...(harness.tierArgs?.[tier] ?? [])];
+  // harness.args goes first (it is documented as *prepended*), which also lets a
+  // test point `command` at an interpreter and `args` at a fake-harness script.
+  const args = [
+    ...(harness.args ?? []),
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    ...(harness.tierArgs?.[tier] ?? []),
+  ];
   if (resumeId) args.push("--resume", resumeId);
   for (const dir of addDirs) args.push("--add-dir", dir);
   return args;
 }
 
 // run({...}) -> {code, text, sessionId, err}
-export function run({ harness, cwd, prompt, resumeId, tier = "dev", env, addDirs = [], onEvent }: RunOptions): Promise<RunResult> {
+export function run({
+  harness,
+  cwd,
+  prompt,
+  resumeId,
+  tier = "dev",
+  env,
+  addDirs = [],
+  onEvent,
+}: RunOptions): Promise<RunResult> {
   return new Promise((resolve) => {
     const args = argv(harness, { tier, resumeId, addDirs });
     const timeoutMs = (harness.timeoutMinutes ?? 45) * 60 * 1000;
@@ -79,7 +97,8 @@ export function run({ harness, cwd, prompt, resumeId, tier = "dev", env, addDirs
     }, timeoutMs);
     proc.stdout!.on("data", (d) => {
       buf += String(d);
-      let nl;
+      let nl: number;
+      // biome-ignore lint/suspicious/noAssignInExpressions: the classic drain-the-buffer line splitter
       while ((nl = buf.indexOf("\n")) >= 0) {
         const line = buf.slice(0, nl).trim();
         buf = buf.slice(nl + 1);
