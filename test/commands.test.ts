@@ -1,8 +1,9 @@
-import { CONFIG_FILE } from "./helpers";
+import { CHANNEL, CONFIG_FILE, GUILD, USER } from "./helpers";
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { MessageFlags } from "discord.js";
 import { loadConfig } from "../dist/config";
-import { handleCommand, statusText, targetRun } from "../dist/commands";
+import { COMMAND_DEFS, handleCommand, handleInteraction, statusText, targetRun } from "../dist/commands";
 import { activeRuns, type ActiveRun } from "../dist/runs";
 import * as sessions from "../dist/sessions";
 
@@ -40,6 +41,25 @@ function fakeMessage(over: Record<string, unknown> = {}) {
   } as any;
   return { message, said, reacted };
 }
+
+// A chat-input interaction stub: same fields handleInteraction reads off a real one.
+function fakeInteraction(over: Record<string, unknown> = {}) {
+  const replies: any[] = [];
+  const interaction = {
+    isChatInputCommand: () => true,
+    commandName: "status",
+    user: { id: USER }, // dev tier in the fixture config
+    member: null,
+    channel: {},
+    channelId: "CH",
+    guildId: GUILD,
+    options: { getString: () => null },
+    reply: async (payload: any) => replies.push(payload),
+    ...over,
+  } as any;
+  return { interaction, replies };
+}
+const isEphemeral = (r: any) => r.flags === MessageFlags.Ephemeral;
 
 test("status lists the live runs and the queued count, or says idle", () => {
   activeRuns.clear();
@@ -105,5 +125,101 @@ test("a cancel that replies to a run's message targets that run", () => {
   // a reply to a message from a run that already finished targets nothing
   activeRuns.delete(entry.runId);
   assert.equal(targetRun(message, 6 * HOUR), null);
+  activeRuns.clear();
+});
+
+// ---- slash commands ----------------------------------------------------------
+test("the registration payload is the two commands Discord expects", () => {
+  assert.deepEqual(
+    COMMAND_DEFS.map((c: any) => c.name),
+    ["status", "cancel"],
+  );
+  for (const c of COMMAND_DEFS as any[]) {
+    assert.match(c.name, /^[a-z]+$/, "command names must be lowercase");
+    assert.ok(c.description.length > 0 && c.description.length <= 100);
+  }
+  const [status, cancel] = COMMAND_DEFS as any[];
+  assert.equal(status.options, undefined, "/status takes no options");
+  assert.deepEqual(
+    cancel.options.map((o: any) => [o.name, o.type, o.required]),
+    [["run", 3, false]], // 3 = ApplicationCommandOptionType.String
+  );
+});
+
+test("/status replies ephemerally to any authorized tier", async () => {
+  activeRuns.clear();
+  register();
+  const dev = fakeInteraction();
+  await handleInteraction(cfg, dev.interaction);
+  assert.match(dev.replies[0].content, /`aaaaaaaa` dev · Fixture Server#general/);
+  assert.ok(isEphemeral(dev.replies[0]), "status stays private");
+
+  // chat tier (fixture: anyone in CHANNEL) may ask for status too
+  const chat = fakeInteraction({ user: { id: "u9" }, channelId: CHANNEL });
+  await handleInteraction(cfg, chat.interaction);
+  assert.match(chat.replies[0].content, /`aaaaaaaa`/);
+  assert.ok(isEphemeral(chat.replies[0]));
+  activeRuns.clear();
+});
+
+test("/cancel kills the channel's newest run and says so publicly", async () => {
+  activeRuns.clear();
+  register({ runId: "cccccccc-1111-2222-3333-444444444444", startedAt: Date.now() - 10 * 60 * 1000 });
+  const { entry, killed } = register({ startedAt: Date.now() - 60 * 1000 });
+  const other = register({ runId: "dddddddd-1111-2222-3333-444444444444", channelId: "OTHER" });
+
+  const { interaction, replies } = fakeInteraction({ commandName: "cancel" });
+  await handleInteraction(cfg, interaction);
+  assert.deepEqual(killed, [true], "the newest run in this channel was the one killed");
+  assert.ok(entry.cancelled);
+  assert.deepEqual(other.killed, [], "a run in another channel is untouched");
+  assert.match(replies[0].content, /^Cancelled run `aaaaaaaa` after 1\.0min\.$/);
+  assert.ok(!isEphemeral(replies[0]), "a cancellation is public");
+  activeRuns.clear();
+});
+
+test("/cancel takes a run id, and refuses one it does not have", async () => {
+  activeRuns.clear();
+  const { killed } = register({ runId: "cccccccc-1111-2222-3333-444444444444", channelId: "OTHER" });
+
+  // by id, even though the run is in another channel
+  const byId = fakeInteraction({ commandName: "cancel", options: { getString: () => "cccccccc" } });
+  await handleInteraction(cfg, byId.interaction);
+  assert.deepEqual(killed, [true]);
+  assert.match(byId.replies[0].content, /^Cancelled run `cccccccc`/);
+
+  const bad = fakeInteraction({ commandName: "cancel", options: { getString: () => "deadbeef" } });
+  await handleInteraction(cfg, bad.interaction);
+  assert.match(bad.replies[0].content, /No active run `deadbeef`/);
+  assert.ok(isEphemeral(bad.replies[0]), "errors stay private");
+
+  // nothing running in this channel at all
+  activeRuns.clear();
+  const idle = fakeInteraction({ commandName: "cancel" });
+  await handleInteraction(cfg, idle.interaction);
+  assert.match(idle.replies[0].content, /Nothing to cancel/);
+  assert.ok(isEphemeral(idle.replies[0]));
+});
+
+test("/cancel is dev-only, and strangers get an ephemeral denial", async () => {
+  activeRuns.clear();
+  const { killed } = register();
+
+  const chat = fakeInteraction({ commandName: "cancel", user: { id: "u9" }, channelId: CHANNEL });
+  await handleInteraction(cfg, chat.interaction);
+  assert.match(chat.replies[0].content, /dev-tier only/);
+  assert.ok(isEphemeral(chat.replies[0]));
+
+  const stranger = fakeInteraction({ commandName: "cancel", user: { id: "rando" } });
+  await handleInteraction(cfg, stranger.interaction);
+  assert.match(stranger.replies[0].content, /Not authorized/);
+  assert.ok(isEphemeral(stranger.replies[0]));
+
+  assert.deepEqual(killed, [], "neither of them killed anything");
+
+  // and a non-command interaction is not our business
+  const other = fakeInteraction({ isChatInputCommand: () => false });
+  await handleInteraction(cfg, other.interaction);
+  assert.deepEqual(other.replies, []);
   activeRuns.clear();
 });

@@ -17,7 +17,7 @@ import { Client, GatewayIntentBits, Events, type Message } from "discord.js";
 import { loadConfig, type Config } from "./config";
 import { log } from "./log";
 import { evaluate } from "./triggers";
-import { handleCommand } from "./commands";
+import { handleCommand, handleInteraction, registerCommands } from "./commands";
 import { startRun } from "./runs";
 import { startMcpServer } from "./mcp-server";
 import { sweep } from "./worktrees";
@@ -46,6 +46,15 @@ export function startBot(config: Config) {
     const mcp = config.mcp ?? {};
     startMcpServer(client, mcp);
     log(`In-process discord-mcp listening on http://${mcp.host ?? "127.0.0.1"}:${mcp.port}${mcp.path ?? "/mcp"}`);
+    registerCommands(c, config); // per-guild, idempotent; logs and moves on if the scope is missing
+  });
+
+  client.on(Events.InteractionCreate, async (interaction) => {
+    try {
+      await handleInteraction(config, interaction);
+    } catch (e: any) {
+      log(`Interaction error: ${e?.stack || e}`);
+    }
   });
 
   client.on(Events.MessageCreate, async (message: Message) => {

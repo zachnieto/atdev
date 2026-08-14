@@ -23,8 +23,13 @@ npm start
 **Discord application setup** (Discord Developer Portal):
 - Bot → Privileged Gateway Intents: enable **Message Content**.
 - Gateway intents the bot requests at login: `Guilds`, `GuildMessages`, `MessageContent`.
-- OAuth2 → URL Generator → scope **bot**, permissions **Send Messages**, **Read Message
-  History**, **Add Reactions**. Use the generated URL to invite the bot to your server.
+- OAuth2 → URL Generator → scopes **bot** *and* **applications.commands**, permissions
+  **Send Messages**, **Read Message History**, **Add Reactions**. Use the generated URL to
+  invite the bot to your server. Both scopes are required: without
+  `applications.commands` Discord rejects slash-command registration with *Missing
+  Access* and only the `@bot` mention commands work (the bot logs the re-invite URL and
+  keeps running). An app invited long ago with `bot` only is re-invited by visiting the
+  two-scope URL — it adds the scope in place, it does not kick the bot.
 
 **Harness**: install the [Claude Code CLI](https://docs.claude.com/en/docs/claude-code)
 and make sure `claude` is on `PATH` (or point `harness.command` in `config.json` at its
@@ -53,16 +58,27 @@ channel's most recent run if it's still within `sessionTtlHours`; otherwise it s
 fresh. A follow-up always runs at the *replying* user's tier, even if the original run
 was a different tier.
 
-**Control commands.** Two @mentions are commands rather than work orders — they
-never spawn a harness, mint a run, or wait in the queue:
+**Control commands.** Two commands are control rather than work orders — they never
+spawn a harness, mint a run, or wait in the queue. Both are Discord slash commands
+(the default UX) and both also work as @mentions, which is what a follow-up in an
+existing conversation usually reaches for:
 
-- `@bot status` — any authorized tier. Lists the runs in flight (short run id,
-  tier, guild#channel, elapsed) plus how many are queued behind
-  `maxConcurrentRuns`, or `idle`.
-- `@bot cancel` — `dev` tier only. Kills the run's process tree: as a Discord
-  reply to one of a run's messages it cancels *that* run, bare it cancels the
-  channel's most recent running one. Reacts 🛑 and reports how long it ran. A
-  cancelled run counts as failed, so its worktree is kept for inspection.
+- `/status` · `@bot status` — any authorized tier. Lists the runs in flight (short
+  run id, tier, guild#channel, elapsed) plus how many are queued behind
+  `maxConcurrentRuns`, or `idle`. The slash reply is ephemeral (only you see it).
+- `/cancel [run]` · `@bot cancel` — `dev` tier only. Kills the run's process tree.
+  `/cancel` takes the optional 8-char run id from `/status` and defaults to the
+  channel's most recent running run; the mention form targets *that* run when it's a
+  Discord reply to one of the run's messages, otherwise the channel's most recent. The
+  slash reply is public (the team should see a run was cancelled), the mention form
+  reacts 🛑. Either way it reports how long it ran, and a cancelled run counts as
+  failed, so its worktree is kept for inspection.
+
+Slash commands are registered per guild at startup (instant, unlike global commands'
+~1h propagation) for every guild in `config.guilds`, re-PUT on every launch so the
+definitions can't drift. Access runs through the same `config.access` rules as
+mentions; an unmatched user gets an ephemeral "Not authorized" rather than the silent
+ignore a mention gets, since Discord surfaces a failure to them regardless.
 
 A run that is waiting for a concurrency slot reacts ⏳ on the triggering message
 and drops it again when it actually starts.
