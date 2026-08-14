@@ -22,7 +22,7 @@ Permalink: {PERMALINK}
 
 {REPOS_MANIFEST}
 
-These paths are readable working checkouts. Read them, grep them, read their git log and diffs — that is how you ground an answer instead of guessing.
+These paths are readable working checkouts. Read them and grep them — that is how you ground an answer instead of guessing. (You have file reading and `gh pr view`/`gh pr list`, but no shell git — don't burn the run retrying `git log`.)
 
 ## Rules
 

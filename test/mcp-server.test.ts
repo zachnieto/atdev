@@ -5,6 +5,8 @@
 import { CHANNEL, GUILD, USER } from "./helpers";
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import http from "node:http";
+import net from "node:net";
 import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
@@ -172,6 +174,45 @@ before(async () => {
 after(async () => {
   await mcp.close();
   await noDefault.close();
+});
+
+test("a forged Host header is refused (DNS rebinding), loopback Hosts are not", async () => {
+  // A rebinding attack arrives same-origin from a browser with Host: attacker.com;
+  // every legitimate local client sends a loopback Host (the SDK client tests above).
+  // Raw node:http, because fetch/undici silently drops a caller-set Host header.
+  const status = await new Promise<number>((resolve, reject) => {
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        port: mcp.port,
+        path: "/mcp",
+        method: "POST",
+        headers: {
+          Host: "attacker.example:8085",
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+        },
+      },
+      (res) => {
+        res.resume();
+        resolve(res.statusCode ?? 0);
+      },
+    );
+    req.on("error", reject);
+    req.end(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }));
+  });
+  assert.equal(status, 403);
+});
+
+test("a port already in use degrades to a logged error, not a crash", async () => {
+  const holder = net.createServer();
+  await new Promise<void>((r) => holder.listen(0, "127.0.0.1", () => r()));
+  const { port } = holder.address() as AddressInfo;
+  const doomed = startMcpServer(discord, { port, host: "127.0.0.1", path: "/mcp" });
+  const [err] = (await once(doomed, "error")) as [NodeJS.ErrnoException];
+  assert.equal(err.code, "EADDRINUSE"); // reaching here at all proves the bot survived it
+  doomed.close();
+  holder.close();
 });
 
 test("all 10 contract tools are registered under their exact names", async () => {

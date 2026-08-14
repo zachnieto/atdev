@@ -43,11 +43,13 @@ export function startBot(config: Config) {
 
   client.once(Events.ClientReady, (c) => {
     log(`Logged in as ${c.user.tag} (${c.user.id})`);
-    const mcp = config.mcp ?? {};
-    startMcpServer(client, mcp);
-    log(`In-process discord-mcp listening on http://${mcp.host ?? "127.0.0.1"}:${mcp.port}${mcp.path ?? "/mcp"}`);
+    startMcpServer(client, config.mcp ?? {}); // logs its bound address once listening
     registerCommands(c, config); // per-guild, idempotent; logs and moves on if the scope is missing
   });
+
+  // An unhandled 'error' event on an EventEmitter kills the process; a gateway
+  // hiccup must be a log line, not downtime (discord.js reconnects on its own).
+  client.on(Events.Error, (e) => log(`Discord client error: ${e?.stack || e}`));
 
   client.on(Events.InteractionCreate, async (interaction) => {
     try {

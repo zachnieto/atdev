@@ -16,7 +16,7 @@ test("chat tier: the read-only allow-list survives as separate argv elements", (
   assert.equal(args[args.indexOf("--permission-mode") + 1], "dontAsk");
 
   const allowed = args.slice(args.indexOf("--allowedTools") + 1, args.indexOf("--add-dir"));
-  assert.ok(allowed.includes("Read") && allowed.includes("Bash(git log*)"), "read tools missing");
+  assert.ok(allowed.includes("Read") && allowed.includes("Bash(gh pr view*)"), "read tools missing");
   assert.ok(allowed.includes("mcp__discord-mcp__read_messages"), "discord read tools missing");
   // `--allowedTools` takes its values greedily, so they must never be comma-joined
   assert.ok(!allowed.some((a) => a.includes(",")), "allowed tools were comma-joined");
@@ -25,6 +25,9 @@ test("chat tier: the read-only allow-list survives as separate argv elements", (
     "chat tier must not be able to post to Discord directly",
   );
   assert.ok(!allowed.some((a) => ["Edit", "Write", "Bash"].includes(a)), "chat tier must not get write tools");
+  // git log/show/diff all accept --output=<file>, which writes through any
+  // prefix allow-list — no Bash(git ...) entry is read-only.
+  assert.ok(!allowed.some((a) => a.startsWith("Bash(git")), "chat tier must not get shell git: --output=<file> is a write path");
   assert.deepEqual(args.slice(-4), ["--add-dir", "D1", "--add-dir", "D2"]);
 });
 

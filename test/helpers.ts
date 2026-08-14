@@ -36,15 +36,14 @@ export const REPO2 = "fixture-infra";
 
 // The chat allow-list is the real one from config.example.json: the argv test is
 // only meaningful if the fixture carries the flags production actually ships.
+// No Bash(git ...) entries: git log/show/diff all take `--output=<file>`, which
+// a prefix allow-list cannot exclude — that is a write path from the read tier.
 const CHAT_TOOLS = [
   "Read",
   "Grep",
   "Glob",
   "WebFetch",
   "WebSearch",
-  "Bash(git log*)",
-  "Bash(git show*)",
-  "Bash(git diff*)",
   "Bash(gh pr view*)",
   "Bash(gh pr list*)",
   "mcp__discord-mcp__read_messages",

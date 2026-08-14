@@ -105,6 +105,7 @@ export function loadConfig(file = path.join(ROOT, "config.json")): Config {
   }
   if (!cfg.guilds || !Object.keys(cfg.guilds).length) throw new Error("config.guilds is empty — the bot would answer nowhere");
   for (const [id, guild] of Object.entries(cfg.guilds) as [string, GuildConfig][]) {
+    if (!guild.name) throw new Error(`config.guilds.${id}.name is missing`); // it lands verbatim in prompts and /status
     for (const name of guild.repos ?? []) {
       if (!cfg.repos[name]) throw new Error(`config.guilds.${id}.repos references unknown repo "${name}"`);
     }

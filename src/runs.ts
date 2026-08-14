@@ -44,14 +44,17 @@ export interface Project {
 // ---- serialization -----------------------------------------------------------
 // Per-run queue: a run's follow-ups never overlap each other. Different runs are
 // independent now that each works in its own worktree.
-const queues = new Map<string, Promise<unknown>>();
+export const queues = new Map<string, Promise<unknown>>(); // exported for tests
 export function enqueue<T>(key: string, job: () => Promise<T>): Promise<T> {
   const prev = queues.get(key) || Promise.resolve();
   const next = prev.then(job, job); // run regardless of prior job's outcome
-  queues.set(
-    key,
-    next.catch(() => {}),
-  );
+  const tail = next.catch(() => {});
+  queues.set(key, tail);
+  // Drop the entry once the tail settles with nothing chained after it —
+  // otherwise the map keeps one resolved promise per run id forever.
+  tail.then(() => {
+    if (queues.get(key) === tail) queues.delete(key);
+  });
   return next;
 }
 
@@ -217,20 +220,26 @@ function dropSection(template: string, key: string, value: string) {
 
 export function fill(template: string, project: Project, message: Message, context: string, files = "") {
   const notes = project.workflowNotes ?? "";
-  return (
-    dropSection(dropSection(template, "WORKFLOW_NOTES", notes), "ATTACHMENTS", files)
-      .replaceAll("{ATTACHMENTS}", files)
-      .replaceAll("{PROJECT}", project.name)
-      .replaceAll("{REPO}", project.repo)
-      .replaceAll("{PR_NOTE}", project.prNote)
-      .replaceAll("{BASE}", project.base)
-      .replaceAll("{REPOS_MANIFEST}", project.manifest ?? "")
-      .replaceAll("{WORKFLOW_NOTES}", notes)
-      // `name` only exists on guild channels; DMs fall back to the id.
-      .replaceAll("{CHANNEL}", (message.channel as any)?.name ?? message.channelId)
-      .replaceAll("{PERMALINK}", permalink(message))
-      .replaceAll("{CONTEXT}", context)
-      .replaceAll("{CONTENT}", message.content)
+  const values: Record<string, string> = {
+    ATTACHMENTS: files,
+    PROJECT: project.name,
+    REPO: project.repo,
+    PR_NOTE: project.prNote,
+    BASE: project.base,
+    REPOS_MANIFEST: project.manifest ?? "",
+    WORKFLOW_NOTES: notes,
+    // `name` only exists on guild channels; DMs fall back to the id.
+    CHANNEL: (message.channel as any)?.name ?? message.channelId,
+    PERMALINK: permalink(message),
+    CONTEXT: context,
+    CONTENT: message.content,
+  };
+  // One pass, function replacement: user content full of `$&`/`$$` stays
+  // byte-identical (string replacements would expand them), and a `{CONTENT}`
+  // smuggled inside a value is never re-scanned as a placeholder.
+  return dropSection(dropSection(template, "WORKFLOW_NOTES", notes), "ATTACHMENTS", files).replace(
+    /\{([A-Z_]+)\}/g,
+    (m, key) => values[key] ?? m,
   );
 }
 
@@ -276,13 +285,16 @@ export function extractReplies(text: string, limit = DEFAULTS.replyLimit, maxMes
 
 // Post reply chunks as a chain: first replies to the mention (with ping), each
 // subsequent chunk replies to the previous one (no ping). Returns the posted
-// messages so the caller can register them as follow-up handles.
-export async function postReplies(message: Message, chunks: string[]): Promise<Message[]> {
+// messages so the caller can register them as follow-up handles; `onPost` fires
+// per message as it lands, so a mid-chain Discord failure doesn't lose the
+// handles for the chunks that did post.
+export async function postReplies(message: Message, chunks: string[], onPost?: (m: Message) => void): Promise<Message[]> {
   const posted: Message[] = [];
   let target = message;
   for (const chunk of chunks) {
     target = await target.reply({ content: chunk, allowedMentions: { repliedUser: posted.length === 0 } });
     posted.push(target);
+    onPost?.(target);
   }
   return posted;
 }
@@ -413,7 +425,7 @@ export async function startRun(config: Config, message: Message, { tier, mode, r
         await message.react("✅").catch(() => {});
         const chunks = extractReplies(res.text, config.replyLimit, config.maxReplyMessages);
         const footer = config.usageFooter === false ? null : usageLine(res, mins);
-        for (const m of await postReplies(message, withFooter(chunks, footer, config.replyLimit))) track(m);
+        await postReplies(message, withFooter(chunks, footer, config.replyLimit), track);
       } else if (entry.cancelled) {
         log(`Run ${runId} was cancelled (exit ${res.code}); no failure reply posted`);
       } else {

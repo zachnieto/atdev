@@ -47,9 +47,11 @@ is ready to `npm start`; after editing `src/`, run `npm run build`.
 
 **Tiers.** Every message that triggers a run resolves to a tier via `config.access`:
 `dev` gets `--permission-mode bypassPermissions` (can edit, run shell, push, open PRs);
-`chat` gets an allow-list of read-only tools (`Read`, `Grep`, read-only `Bash(git ...)`,
-read-only Discord MCP tools) — no `Edit`/`Write`/`Bash` general shell. The restriction
-is enforced by the harness's own CLI flags, not by asking the model nicely.
+`chat` gets an allow-list of read-only tools (`Read`, `Grep`, `gh pr view`/`list`,
+read-only Discord MCP tools) — no `Edit`/`Write`/`Bash` general shell, and no
+`Bash(git ...)` either: `git log`/`show`/`diff` accept `--output=<file>`, so a prefix
+allow-list can't make them read-only. The restriction is enforced by the harness's
+own CLI flags, not by asking the model nicely.
 
 **Work orders vs. follow-ups.** A run starts when someone @mentions the bot, or
 replies (unpinged) to one of the bot's own messages from a still-live run — the reply

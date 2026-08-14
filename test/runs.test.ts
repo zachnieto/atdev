@@ -7,10 +7,13 @@ import { loadConfig, ROOT } from "../dist/config";
 import {
   acquire,
   busy,
+  enqueue,
   extractReplies,
   fill,
   gatherContext,
+  postReplies,
   projectFor,
+  queues,
   recordUsage,
   release,
   renderManifest,
@@ -211,6 +214,18 @@ test("{ATTACHMENTS} appears only when the message carried files", async () => {
   }
 });
 
+test("fill keeps $-patterns byte-identical and never re-scans substituted content", async () => {
+  const message = conversation();
+  // `$&`/`$$`/`$'` are special in String.replace string-replacements; a literal
+  // `{REPO}` inside user content must stay literal, not become the repo path.
+  message.content = "why does the build print $&foo and $$PATH? see {REPO}";
+  const project = projectFor(cfg, message);
+  const context = "friend: costs $$5, backtick `$'` too";
+  const out = fill(prompt("chat.md"), project, message, context);
+  assert.ok(out.includes(message.content), "user content was mangled by replacement patterns");
+  assert.ok(out.includes(context), "context was mangled by replacement patterns");
+});
+
 test("a DM-shaped message falls back to the channel id", () => {
   const message = conversation();
   message.channel.name = undefined;
@@ -253,6 +268,78 @@ test("recordUsage appends one JSON line per run to the (overridable) usage file"
   assert.equal(lines.length, 2);
   assert.deepEqual(lines[0], { runId: "r1", tokensIn: 10, tokensOut: 2, ok: true });
   assert.equal(lines[1].runId, "r2");
+});
+
+// ---- posting -----------------------------------------------------------------
+// A message stub whose reply() returns another such stub, so chunks chain; the
+// nth reply can be made to fail like a Discord 5xx.
+function replyChain(failAt = Infinity) {
+  const posted: any[] = [];
+  let count = 0;
+  const make = (): any => ({
+    reply: async ({ content, allowedMentions }: any) => {
+      if (++count === failAt) throw new Error("boom");
+      const m = make();
+      m.content = content;
+      m.ping = allowedMentions.repliedUser;
+      posted.push(m);
+      return m;
+    },
+  });
+  return { root: make(), posted };
+}
+
+test("postReplies chains chunks, pings only the first, and reports each as it lands", async () => {
+  const { root } = replyChain();
+  const seen: any[] = [];
+  const out = await postReplies(root, ["one", "two", "three"], (m) => seen.push(m));
+  assert.deepEqual(
+    out.map((m: any) => [m.content, m.ping]),
+    [
+      ["one", true],
+      ["two", false],
+      ["three", false],
+    ],
+  );
+  assert.deepEqual(seen, out, "every posted message was reported");
+});
+
+test("a mid-chain posting failure still reports the chunks that did land", async () => {
+  const { root, posted } = replyChain(2);
+  const seen: any[] = [];
+  await assert.rejects(
+    postReplies(root, ["one", "two"], (m) => seen.push(m)),
+    /boom/,
+  );
+  assert.equal(posted.length, 1, "only the first chunk posted");
+  assert.deepEqual(seen, posted, "the posted chunk must be reported so follow-up replies to it still resume");
+});
+
+// ---- per-run queue -----------------------------------------------------------
+test("enqueue serializes per key, survives failures, and drops settled entries", async () => {
+  const order: string[] = [];
+  const p1 = enqueue("k", async () => {
+    await new Promise((r) => setTimeout(r, 20));
+    order.push("first");
+  });
+  const p2 = enqueue("k", async () => {
+    order.push("second");
+  });
+  assert.ok(queues.has("k"), "a live queue is tracked");
+  await Promise.all([p1, p2]);
+  assert.deepEqual(order, ["first", "second"], "jobs for one key must not overlap or reorder");
+  await new Promise((r) => setImmediate(r));
+  assert.ok(!queues.has("k"), "a settled queue entry leaked");
+
+  // a failing job neither wedges the queue nor leaks its entry
+  const bad = enqueue("k2", async () => {
+    throw new Error("job died");
+  });
+  const good = enqueue("k2", async () => "ok");
+  await assert.rejects(bad, /job died/);
+  assert.equal(await good, "ok");
+  await new Promise((r) => setImmediate(r));
+  assert.ok(!queues.has("k2"));
 });
 
 // ---- global concurrency cap --------------------------------------------------

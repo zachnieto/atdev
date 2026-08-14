@@ -75,18 +75,27 @@ test("the branch outlives the worktree, so a follow-up checks it back out", () =
   assert.equal(git(p2, "rev-parse", "--abbrev-ref", "HEAD").trim(), "atdev/abcdef12");
 });
 
-test("sweep collects expired entries and orphan directories, and spares live ones", () => {
+test("sweep collects expired entries and aged orphans, and spares live/fresh ones", () => {
   const reg = worktrees.load();
   reg["tmp-abcdef12"].createdAt = new Date(Date.now() - 48 * HOUR).toISOString();
   fs.writeFileSync(worktrees.STATE_FILE, JSON.stringify(reg));
-  const orphan = path.join(wtRoot, "tmp-deadbeef");
-  fs.mkdirSync(orphan, { recursive: true });
-  fs.writeFileSync(path.join(orphan, "junk.txt"), "x");
+  // An aged orphan (crash leftover) goes; a fresh one may be a live run
+  // mid-`git worktree add` whose registry write hasn't landed yet — spared.
+  const aged = path.join(wtRoot, "tmp-deadbeef");
+  const freshOrphan = path.join(wtRoot, "tmp-feedface");
+  for (const d of [aged, freshOrphan]) {
+    fs.mkdirSync(d, { recursive: true });
+    fs.writeFileSync(path.join(d, "junk.txt"), "x");
+  }
+  const ago = new Date(Date.now() - 48 * HOUR);
+  fs.utimesSync(aged, ago, ago);
 
   worktrees.sweep(cfg);
   assert.deepEqual(worktrees.load(), {}, "expired entry survived the sweep");
   assert.ok(!fs.existsSync(path.join(wtRoot, "tmp-abcdef12")), "expired worktree survived the sweep");
-  assert.ok(!fs.existsSync(orphan), "orphan directory survived the sweep");
+  assert.ok(!fs.existsSync(aged), "aged orphan directory survived the sweep");
+  assert.ok(fs.existsSync(freshOrphan), "sweep ate a fresh untracked directory — that may be a run mid-create");
+  fs.rmSync(freshOrphan, { recursive: true, force: true });
   assert.equal(listed(), baseline);
 
   const p3 = worktrees.create("tmp", "origin/main", cfg);

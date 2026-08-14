@@ -17,6 +17,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { ChannelType, type Client } from "discord.js";
 import type { McpConfig } from "./config";
+import { log } from "./log";
 
 function typeName(t: number) {
   return ChannelType[t] ?? String(t);
@@ -283,13 +284,23 @@ function registerTools(server: McpServer, client: Client, defaultGuildId?: strin
 // ---- HTTP wiring (stateless Streamable HTTP, no Express) ----------------------
 // One McpServer + transport per request — stateless transports cannot be
 // reused across requests (the SDK throws if you try).
+const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
+
 export function startMcpServer(
   client: Client,
   { host = "127.0.0.1", port = 8086, path: mcpPath = "/mcp", defaultGuildId }: McpConfig = {},
 ) {
+  const guardHost = LOOPBACK.has(host); // an operator binding wider opted out
   const httpServer = http.createServer(async (req, res) => {
     if (req.url !== mcpPath) {
       res.writeHead(404).end();
+      return;
+    }
+    // DNS-rebinding guard: a browser lured to attacker.com resolving to
+    // 127.0.0.1 sends Host: attacker.com — same-origin, so CORS never applies.
+    // Local clients always send a loopback Host, so only forgeries get 403.
+    if (guardHost && !LOOPBACK.has((req.headers.host ?? "").replace(/:\d+$/, ""))) {
+      res.writeHead(403).end();
       return;
     }
     const server = new McpServer({ name: "discord-mcp", version: "1.0.0" });
@@ -309,6 +320,13 @@ export function startMcpServer(
       }
     }
   });
-  httpServer.listen(port, host);
+  // A bind failure (port already held) must degrade the MCP surface, not crash
+  // the bot: an unhandled 'error' event would take the whole process down.
+  httpServer.on("error", (e: any) => log(`discord-mcp server error: ${e?.message || e}`));
+  httpServer.listen(port, host, () => {
+    const addr = httpServer.address();
+    const boundPort = addr && typeof addr === "object" ? addr.port : port;
+    log(`In-process discord-mcp listening on http://${host}:${boundPort}${mcpPath}`);
+  });
   return httpServer;
 }

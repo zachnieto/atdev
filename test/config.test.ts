@@ -57,22 +57,31 @@ test("rejects every unusable config", () => {
   assert.throws(() => loadConfig(bad({ repos: { a: { path: ROOT } } })), /repos\.a\.base is missing/);
   assert.throws(() => loadConfig(bad({ repos: { a: { path: ROOT, base: "x" } } })), /guilds is empty/);
   assert.throws(
-    () => loadConfig(bad({ repos: { a: { path: ROOT, base: "x" } }, guilds: { g: { repos: ["b"] } } })),
+    () => loadConfig(bad({ repos: { a: { path: ROOT, base: "x" } }, guilds: { g: {} } })),
+    /guilds\.g\.name is missing/, // "undefined" would land verbatim in prompts and /status
+  );
+  assert.throws(
+    () => loadConfig(bad({ repos: { a: { path: ROOT, base: "x" } }, guilds: { g: { name: "G", repos: ["b"] } } })),
     /unknown repo "b"/,
   );
   assert.throws(
-    () => loadConfig(bad({ repos: { a: { path: ROOT, base: "x" } }, guilds: { g: { repos: ["a"] } } })),
+    () => loadConfig(bad({ repos: { a: { path: ROOT, base: "x" } }, guilds: { g: { name: "G", repos: ["a"] } } })),
     /access is empty/,
   );
   assert.throws(
     () =>
       loadConfig(
-        bad({ repos: { a: { path: ROOT, base: "x" } }, guilds: { g: {} }, access: [{ user: "u" }], harness: { command: "c" } }),
+        bad({
+          repos: { a: { path: ROOT, base: "x" } },
+          guilds: { g: { name: "G" } },
+          access: [{ user: "u" }],
+          harness: { command: "c" },
+        }),
       ),
     /missing a tier/,
   );
   assert.throws(
-    () => loadConfig(bad({ repos: { a: { path: ROOT, base: "x" } }, guilds: { g: {} }, access: [{ tier: "dev" }] })),
+    () => loadConfig(bad({ repos: { a: { path: ROOT, base: "x" } }, guilds: { g: { name: "G" } }, access: [{ tier: "dev" }] })),
     /harness\.command is missing/,
   );
 });

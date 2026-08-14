@@ -146,6 +146,15 @@ export function sweep(config: Pick<Config, "workspaceDir" | "worktreeTtlHours" |
   for (const d of readdirSafe(root)) {
     const full = path.join(root, d.name);
     if (known.has(path.resolve(full))) continue;
+    // Only reap orphans past the TTL: a fresh untracked directory may be a
+    // live run mid-`git worktree add` (the registry write comes after) or a
+    // victim of the registry's last-writer-wins race — deleting it under a
+    // running agent would break the run.
+    try {
+      if (fs.statSync(full).mtimeMs > cutoff) continue;
+    } catch {
+      continue;
+    }
     log(`Deleting orphan worktree directory ${full}`);
     rm(full);
   }
