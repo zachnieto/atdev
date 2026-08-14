@@ -67,6 +67,16 @@ never spawn a harness, mint a run, or wait in the queue:
 A run that is waiting for a concurrency slot reacts ⏳ on the triggering message
 and drops it again when it actually starts.
 
+**Attachments.** Files on the triggering message — plus, when the mention is a
+Discord reply, the files on the message it replies to — are downloaded before the
+harness starts into `<workspaceDir>/attachments/<run id prefix>/` and listed in the
+prompt with their local path, original filename and content type, so the agent just
+`Read`s them (screenshots, logs, CSVs). Both tiers get them. Caps are fixed in code,
+not config: **5 files, 10MB each**; anything over the cap or that fails to download is
+skipped and *noted in the prompt* — never fatal to the run. Backscroll attachments are
+not included. A successful run's files are deleted with its worktree; a failed run
+keeps them for inspection and the same sweep reaps them after `worktreeTtlHours`.
+
 **Repos manifest + self-routing worktrees.** `config.repos` lists every repo the bot
 knows about, and `config.guilds.<id>.repos` scopes which of them a given Discord
 server offers. A dev run is handed the manifest (path/base/description/notes per
@@ -118,7 +128,8 @@ session at it, add to that repo's `.mcp.json`:
 - `access` — ordered list of rules; first match wins, no match = silently ignored. Each rule may key on `user`/`role`/`guild`/`channel` (a channel rule also matches its threads), all present keys must match, and it must set a `tier`. `everyone: true` on a rule is documentation only — a rule with no identity key already matches anyone.
 - `workflowNotes` — free-text operator instructions (e.g. issue-tracker conventions) injected into dev-run prompts.
 - `sessionTtlHours` — how long a run stays resumable via mention/reply.
-- `worktreeTtlHours` — how long a worktree survives before the sweep reclaims it.
+- `worktreeTtlHours` — how long a worktree (or a failed run's downloaded attachments)
+  survives before the sweep reclaims it.
 - `backscrollCount` — channel messages fetched for ambient context on a fresh run.
 - `replyChainMax` — how far up a Discord reply chain to walk for context.
 - `replyLimit` — max characters per posted Discord message (Discord's hard cap is 2000).
@@ -134,8 +145,9 @@ session at it, add to that repo's `.mcp.json`:
 ## Prompt customization
 
 The prompt templates live in `prompts/` and are filled with placeholders like
-`{CONTENT}`, `{CONTEXT}`, `{REPOS_MANIFEST}`, `{WORKFLOW_NOTES}` (see `src/runs.ts`'s
-`fill()` for the full list):
+`{CONTENT}`, `{CONTEXT}`, `{REPOS_MANIFEST}`, `{WORKFLOW_NOTES}`, `{ATTACHMENTS}` (see
+`src/runs.ts`'s `fill()` for the full list). `{WORKFLOW_NOTES}` and `{ATTACHMENTS}` take
+their own heading with them when there is nothing to fill in:
 
 - `prompts/work-order.md` — fresh `dev`-tier run: routing, worktree/PR rules, reply contract.
 - `prompts/chat.md` — fresh `chat`-tier run: read-only teammate, same reply contract.

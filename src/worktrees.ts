@@ -126,23 +126,42 @@ export function sweep(config: Pick<Config, "workspaceDir" | "worktreeTtlHours" |
     }
   }
 
-  const root = path.join(config.workspaceDir, "worktrees");
-  const known = new Set(Object.values(reg).map((e) => path.resolve(e.path)));
-  let dirs: fs.Dirent[] = [];
-  try {
-    dirs = fs.readdirSync(root, { withFileTypes: true });
-  } catch {
-    return; // nothing created yet
-  }
-  for (const d of dirs) {
-    const full = path.join(root, d.name);
-    if (known.has(path.resolve(full))) continue;
-    log(`Deleting orphan worktree directory ${full}`);
+  const rm = (full: string) => {
     try {
       fs.rmSync(full, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 });
     } catch (e: any) {
-      log(`Orphan delete failed for ${full}: ${e.message}`);
+      log(`Delete failed for ${full}: ${e.message}`);
     }
+  };
+  const readdirSafe = (p: string) => {
+    try {
+      return fs.readdirSync(p, { withFileTypes: true });
+    } catch {
+      return []; // nothing created yet
+    }
+  };
+
+  const root = path.join(config.workspaceDir, "worktrees");
+  const known = new Set(Object.values(reg).map((e) => path.resolve(e.path)));
+  for (const d of readdirSafe(root)) {
+    const full = path.join(root, d.name);
+    if (known.has(path.resolve(full))) continue;
+    log(`Deleting orphan worktree directory ${full}`);
+    rm(full);
+  }
+
+  // Attachment dirs have no registry — a failed run's files are kept for
+  // inspection, and age out here on the same TTL, judged by mtime.
+  const attRoot = path.join(config.workspaceDir, "attachments");
+  for (const d of readdirSafe(attRoot)) {
+    const full = path.join(attRoot, d.name);
+    try {
+      if (fs.statSync(full).mtimeMs > cutoff) continue;
+    } catch {
+      continue;
+    }
+    log(`Sweeping expired attachments ${full}`);
+    rm(full);
   }
 }
 

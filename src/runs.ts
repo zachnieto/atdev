@@ -26,6 +26,7 @@ import { type Config, DEFAULTS, ROOT, type RepoConfig } from "./config";
 import { log } from "./log";
 import { recordRun, recordSession, recordMessage } from "./sessions";
 import { markRunEnded } from "./worktrees";
+import * as attachments from "./attachments";
 import type { RunMatch } from "./triggers";
 import type { RunnerEvent, RunResult } from "./runners/claude";
 import * as claude from "./runners/claude";
@@ -209,11 +210,16 @@ export function projectFor(config: Config, message: Message): Project {
   };
 }
 
-export function fill(template: string, project: Project, message: Message, context: string) {
+// A placeholder with nothing to say takes its own heading with it.
+function dropSection(template: string, key: string, value: string) {
+  return value ? template : template.replace(new RegExp(`#+ [^\\n]*\\n+(?=\\{${key}\\})`), "");
+}
+
+export function fill(template: string, project: Project, message: Message, context: string, files = "") {
   const notes = project.workflowNotes ?? "";
-  // An operator with no workflow notes shouldn't get a dangling heading.
   return (
-    (notes ? template : template.replace(/#+ Workflow notes[^\n]*\n+(?=\{WORKFLOW_NOTES\})/, ""))
+    dropSection(dropSection(template, "WORKFLOW_NOTES", notes), "ATTACHMENTS", files)
+      .replaceAll("{ATTACHMENTS}", files)
       .replaceAll("{PROJECT}", project.name)
       .replaceAll("{REPO}", project.repo)
       .replaceAll("{PR_NOTE}", project.prNote)
@@ -323,6 +329,18 @@ export async function startRun(config: Config, message: Message, { tier, mode, r
     // the worktrees it creates under the workspace. Chat stays as it was.
     const dev = tier === "dev";
     if (dev) fs.mkdirSync(config.workspaceDir, { recursive: true });
+    // Files the message carried, downloaded before the slot wait (it is I/O, not
+    // a slot) and handed to the agent as local paths. Never fatal: a failed
+    // download is a note in the prompt, and must not leak the registry entry.
+    const attDir = attachments.attachmentsDir(config.workspaceDir, runId);
+    const saved = await attachments
+      .collect(message)
+      .then((list) => attachments.save(list, attDir))
+      .catch((e: any) => {
+        log(`Attachment download failed for run ${runId}: ${e?.message || e}`);
+        return { files: [], notes: [] };
+      });
+    const files = attachments.render(saved);
     const spawn = (prompt: string, resume: string | null) =>
       claude.run({
         harness: config.harness,
@@ -331,7 +349,12 @@ export async function startRun(config: Config, message: Message, { tier, mode, r
         resumeId: resume,
         tier,
         env: dev ? { ATDEV_RUN_ID: runId, ATDEV_WORKTREE_HELPER: path.join(__dirname, "worktrees.js") } : undefined,
-        addDirs: dev ? [project.repo, ...project.addDirs] : project.addDirs,
+        // chat's cwd is a repo, so the attachment dir needs its own root; dev's
+        // cwd is the workspace, which already contains it.
+        addDirs: [
+          ...(dev ? [project.repo, ...project.addDirs] : project.addDirs),
+          ...(saved.files.length && !dev ? [attDir] : []),
+        ],
         onEvent,
         onSpawn: (kill) => {
           entry.kill = kill;
@@ -353,7 +376,7 @@ export async function startRun(config: Config, message: Message, { tier, mode, r
         // (the session already has the earlier context).
         const context = await gatherContext(config, message, { backscroll: false });
         log(`Resuming session ${run.sessionId} for run ${runId}`);
-        res = await spawn(fill(TEMPLATE_FOLLOWUP, project, message, context), run.sessionId);
+        res = await spawn(fill(TEMPLATE_FOLLOWUP, project, message, context, files), run.sessionId);
         if (res.code !== 0) {
           log(`Resume failed (exit ${res.code}); retrying as a fresh session. ${res.err.slice(0, 200)}`);
           res = null;
@@ -361,7 +384,7 @@ export async function startRun(config: Config, message: Message, { tier, mode, r
       }
       if (!res) {
         const context = await gatherContext(config, message, { backscroll: true });
-        res = await spawn(fill(tier === "chat" ? TEMPLATE_CHAT : TEMPLATE_DEV, project, message, context), null);
+        res = await spawn(fill(tier === "chat" ? TEMPLATE_CHAT : TEMPLATE_DEV, project, message, context, files), null);
       }
 
       const mins = ((Date.now() - started) / 60000).toFixed(1);
@@ -410,6 +433,7 @@ export async function startRun(config: Config, message: Message, { tier, mode, r
       release();
       activeRuns.delete(runId);
       markRunEnded(runId, ok); // no-op for a run that made no worktrees
+      attachments.cleanup(attDir, ok); // kept on failure, swept on TTL
     }
   });
 }

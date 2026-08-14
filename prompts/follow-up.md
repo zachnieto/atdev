@@ -12,6 +12,10 @@ Permalink: {PERMALINK}
 
 {CONTEXT}
 
+## Attached files
+
+{ATTACHMENTS}
+
 Act on it as a continuation of the prior conversation — same worktree, same branch, same PR unless this is genuinely new work. While you work the requester just sees a typing indicator, so no interim updates are needed. As before, end your final message with the Discord reply wrapped EXACTLY in:
 
 <reply>

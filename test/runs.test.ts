@@ -195,6 +195,22 @@ test("every prompt template fills completely, and empty workflow notes take thei
   assert.ok(without.includes(`### ${REPO1}`), "rest of the prompt survived the strip");
 });
 
+test("{ATTACHMENTS} appears only when the message carried files", async () => {
+  const message = conversation();
+  const project = projectFor(cfg, message);
+  const files = "The message carried files:\n- /ws/attachments/abcdef12/shot.png";
+
+  for (const name of ["work-order.md", "chat.md", "follow-up.md"]) {
+    const none = fill(prompt(name), project, message, "(none)");
+    assert.ok(!none.includes("{ATTACHMENTS}"), `leftover placeholder in ${name}`);
+    assert.ok(!none.includes("Attached files"), `dangling attachments heading in ${name}`);
+
+    const with_ = fill(prompt(name), project, message, "(none)", files);
+    assert.ok(with_.includes("## Attached files"), `${name} dropped the attachments heading`);
+    assert.ok(with_.includes(files), `${name} dropped the attachment list`);
+  }
+});
+
 test("a DM-shaped message falls back to the channel id", () => {
   const message = conversation();
   message.channel.name = undefined;
