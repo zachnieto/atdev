@@ -143,6 +143,11 @@ session at it, add to that repo's `.mcp.json`:
 - `repos.<name>.notes` — that repo's conventions (PR target, lint gate, etc.), shown to dev runs.
 - `guilds.<id>.name` — display name for the guild, used in logs and prompts.
 - `guilds.<id>.repos` — which `repos` this guild offers (omit for "all of them").
+- `guilds.<id>.home` — general-purpose mode instead of repos: every run (either tier) starts
+  in this directory with `prompts/general.md` — no manifest, no worktrees. It's your normal
+  `claude` launched from there: user-scope MCP servers, skills and `~/.claude/CLAUDE.md` always
+  load, and auto-memory is keyed by this path (use your home dir to share your usual memory).
+  Can't be combined with `repos`; `config.repos` may be empty if every guild has a `home`.
 - `access` — ordered list of rules; first match wins, no match = silently ignored. Each rule may key on `user`/`role`/`guild`/`channel` (a channel rule also matches its threads), all present keys must match, and it must set a `tier`. `everyone: true` on a rule is documentation only — a rule with no identity key already matches anyone.
 - `workflowNotes` — free-text operator instructions (e.g. issue-tracker conventions) injected into dev-run prompts.
 - `sessionTtlHours` — how long a run stays resumable via mention/reply.
@@ -169,6 +174,7 @@ their own heading with them when there is nothing to fill in:
 
 - `prompts/work-order.md` — fresh `dev`-tier run: routing, worktree/PR rules, reply contract.
 - `prompts/chat.md` — fresh `chat`-tier run: read-only teammate, same reply contract.
+- `prompts/general.md` — fresh run in a guild with a `home` (either tier): general-purpose, no repos.
 - `prompts/follow-up.md` — resumed run of either tier (leaner; the session already has context).
 
 Operator-specific process (issue tracker conventions, PR checklist, whatever) belongs

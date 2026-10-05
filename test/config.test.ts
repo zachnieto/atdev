@@ -45,13 +45,25 @@ test("absolute paths pass through byte-identical; relative ones resolve against 
   assert.equal(loadConfig(rel).workspaceDir, path.resolve(ROOT, "./workspace"));
 });
 
+test("a general-purpose guild needs no repos at all", () => {
+  const file = writeConfig({ repos: undefined, guilds: { [GUILD]: { name: "Home", home: TMP } } }, "general.json");
+  const cfg = loadConfig(file);
+  assert.deepEqual(cfg.repos, {});
+  assert.equal(cfg.guilds[GUILD].home, TMP);
+});
+
 test("rejects every unusable config", () => {
   assert.throws(() => loadConfig(path.join(TMP, "nope.json")), /config not found/);
 
   fs.writeFileSync(path.join(TMP, "syntax.json"), "{nope");
   assert.throws(() => loadConfig(path.join(TMP, "syntax.json")), /not valid JSON/);
 
-  assert.throws(() => loadConfig(bad({})), /repos is empty/);
+  assert.throws(() => loadConfig(bad({ guilds: { g: { name: "G" } } })), /no home and config\.repos is empty/);
+  assert.throws(() => loadConfig(bad({ guilds: { g: { name: "G", home: path.join(TMP, "gone") } } })), /home does not exist/);
+  assert.throws(
+    () => loadConfig(bad({ repos: { a: { path: ROOT, base: "x" } }, guilds: { g: { name: "G", home: ROOT, repos: ["a"] } } })),
+    /both home and repos/,
+  );
   assert.throws(() => loadConfig(bad({ repos: { a: { base: "x" } } })), /repos\.a\.path is missing/);
   assert.throws(() => loadConfig(bad({ repos: { a: { path: path.join(TMP, "gone"), base: "x" } } })), /does not exist/);
   assert.throws(() => loadConfig(bad({ repos: { a: { path: ROOT } } })), /repos\.a\.base is missing/);

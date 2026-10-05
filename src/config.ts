@@ -17,6 +17,9 @@ export interface RepoConfig {
 export interface GuildConfig {
   name: string;
   repos?: string[];
+  // General-purpose mode: runs start here with no repos manifest, like `claude`
+  // launched from this directory (same project memory, same .mcp.json).
+  home?: string;
 }
 
 export interface AccessRule {
@@ -96,7 +99,7 @@ export function loadConfig(file = path.join(ROOT, "config.json")): Config {
   }
   cfg = { ...DEFAULTS, ...cfg };
 
-  if (!cfg.repos || !Object.keys(cfg.repos).length) throw new Error("config.repos is empty — at least one repo is required");
+  cfg.repos ??= {};
   for (const [name, repo] of Object.entries(cfg.repos) as [string, RepoConfig][]) {
     if (!repo.path) throw new Error(`config.repos.${name}.path is missing`);
     repo.path = resolvePath(repo.path);
@@ -106,6 +109,13 @@ export function loadConfig(file = path.join(ROOT, "config.json")): Config {
   if (!cfg.guilds || !Object.keys(cfg.guilds).length) throw new Error("config.guilds is empty — the bot would answer nowhere");
   for (const [id, guild] of Object.entries(cfg.guilds) as [string, GuildConfig][]) {
     if (!guild.name) throw new Error(`config.guilds.${id}.name is missing`); // it lands verbatim in prompts and /status
+    if (guild.home) {
+      if (guild.repos?.length) throw new Error(`config.guilds.${id} sets both home and repos — pick one`);
+      guild.home = resolvePath(guild.home);
+      if (!fs.existsSync(guild.home)) throw new Error(`config.guilds.${id}.home does not exist: ${guild.home}`);
+      continue;
+    }
+    if (!Object.keys(cfg.repos).length) throw new Error(`config.guilds.${id} has no home and config.repos is empty`);
     for (const name of guild.repos ?? []) {
       if (!cfg.repos[name]) throw new Error(`config.guilds.${id}.repos references unknown repo "${name}"`);
     }
