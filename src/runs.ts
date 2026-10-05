@@ -39,6 +39,7 @@ export interface Project {
   manifest: string;
   addDirs: string[];
   workflowNotes: string;
+  general?: boolean; // guild has a `home`: repo is that dir, no manifest/worktrees
 }
 
 // ---- serialization -----------------------------------------------------------
@@ -172,6 +173,7 @@ export async function gatherContext(config: Config, message: Message, { backscro
 // ---- prompts -----------------------------------------------------------------
 const TEMPLATE_DEV = fs.readFileSync(path.join(ROOT, "prompts", "work-order.md"), "utf8");
 const TEMPLATE_CHAT = fs.readFileSync(path.join(ROOT, "prompts", "chat.md"), "utf8");
+const TEMPLATE_GENERAL = fs.readFileSync(path.join(ROOT, "prompts", "general.md"), "utf8");
 const TEMPLATE_FOLLOWUP = fs.readFileSync(path.join(ROOT, "prompts", "follow-up.md"), "utf8");
 
 function permalink(message: Message) {
@@ -200,6 +202,19 @@ export function renderManifest(repos: (RepoConfig & { name: string })[]) {
 }
 
 export function projectFor(config: Config, message: Message): Project {
+  const guild = config.guilds[message.guildId!];
+  if (guild?.home) {
+    return {
+      name: guild.name,
+      repo: guild.home,
+      prNote: "",
+      base: "",
+      manifest: "",
+      addDirs: [],
+      workflowNotes: (config.workflowNotes ?? "").trim(),
+      general: true,
+    };
+  }
   const repos = reposFor(config, message);
   const [first] = repos;
   return {
@@ -339,7 +354,9 @@ export async function startRun(config: Config, message: Message, { tier, mode, r
     // A dev run starts in the workspace and never has a repo as its cwd: it
     // reads the checkouts (all of them --add-dir'd) to route, and writes only in
     // the worktrees it creates under the workspace. Chat stays as it was.
-    const dev = tier === "dev";
+    // A general-purpose guild runs in its home for both tiers: no repos, no
+    // worktrees — just the user's own Claude pointed at that directory.
+    const dev = tier === "dev" && !project.general;
     if (dev) fs.mkdirSync(config.workspaceDir, { recursive: true });
     // Files the message carried, downloaded before the slot wait (it is I/O, not
     // a slot) and handed to the agent as local paths. Never fatal: a failed
@@ -396,7 +413,8 @@ export async function startRun(config: Config, message: Message, { tier, mode, r
       }
       if (!res) {
         const context = await gatherContext(config, message, { backscroll: true });
-        res = await spawn(fill(tier === "chat" ? TEMPLATE_CHAT : TEMPLATE_DEV, project, message, context, files), null);
+        const template = project.general ? TEMPLATE_GENERAL : tier === "chat" ? TEMPLATE_CHAT : TEMPLATE_DEV;
+        res = await spawn(fill(template, project, message, context, files), null);
       }
 
       const mins = ((Date.now() - started) / 60000).toFixed(1);

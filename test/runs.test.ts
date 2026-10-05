@@ -162,6 +162,14 @@ test("projectFor: cwd is the guild's first repo, the rest become --add-dir", () 
   assert.deepEqual(all.addDirs, [cfg.repos[REPO2].path]);
 });
 
+test("projectFor: a guild with a home is general-purpose — cwd is home, no repos", () => {
+  const project = projectFor({ ...cfg, guilds: { [GUILD]: { name: "Home", home: "/h" } } }, conversation());
+  assert.equal(project.general, true);
+  assert.equal(project.repo, "/h");
+  assert.deepEqual(project.addDirs, []);
+  assert.equal(project.manifest, "");
+});
+
 test("renderManifest emits one block per repo with empty strings for missing prose", () => {
   assert.equal(
     renderManifest([{ name: "solo", path: "/p", base: "origin/main" }]),
@@ -174,7 +182,7 @@ test("every prompt template fills completely, and empty workflow notes take thei
   const project = projectFor(cfg, message);
   const context = await gatherContext(cfg, message, { backscroll: true });
 
-  for (const name of ["work-order.md", "chat.md", "follow-up.md"]) {
+  for (const name of ["work-order.md", "chat.md", "general.md", "follow-up.md"]) {
     const out = fill(prompt(name), project, message, context);
     assert.ok(!/\{[A-Z_]+\}/.test(out), `unfilled placeholder in ${name}: ${out.match(/\{[A-Z_]+\}/)}`);
     assert.ok(out.includes(message.content), `${name} dropped the request`);
@@ -203,7 +211,7 @@ test("{ATTACHMENTS} appears only when the message carried files", async () => {
   const project = projectFor(cfg, message);
   const files = "The message carried files:\n- /ws/attachments/abcdef12/shot.png";
 
-  for (const name of ["work-order.md", "chat.md", "follow-up.md"]) {
+  for (const name of ["work-order.md", "chat.md", "general.md", "follow-up.md"]) {
     const none = fill(prompt(name), project, message, "(none)");
     assert.ok(!none.includes("{ATTACHMENTS}"), `leftover placeholder in ${name}`);
     assert.ok(!none.includes("Attached files"), `dangling attachments heading in ${name}`);
